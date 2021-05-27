@@ -573,7 +573,7 @@ void CACHE::handle_read()
                     else if (cache_type == IS_LLC)
 		      {
 			cpu = read_cpu;
-			llc_prefetcher_operate(block[set][way].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 1, RQ.entry[index].type, 0, RQ.entry[index].instr_id, current_core_cycle[read_cpu]);
+			llc_prefetcher_operate(block[set][way].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 1, RQ.entry[index].type, 0, ((RQ.entry[index].instr_id << 2) | read_cpu), current_core_cycle[read_cpu]);
 			cpu = 0;
 		      }
                 }
@@ -797,7 +797,7 @@ void CACHE::handle_read()
                         if (cache_type == IS_LLC)
 			  {
 			    cpu = read_cpu;
-			    llc_prefetcher_operate(RQ.entry[index].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 0, RQ.entry[index].type, 0, RQ.entry[index].instr_id, current_core_cycle[read_cpu]);
+			    llc_prefetcher_operate(RQ.entry[index].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 0, RQ.entry[index].type, 0, ((RQ.entry[index].instr_id << 2) | read_cpu), current_core_cycle[read_cpu]);
 			    cpu = 0;
 			  }
                     }
@@ -1388,7 +1388,9 @@ int CACHE::add_wq(PACKET *packet)
 
 int CACHE::prefetch_line(uint64_t ip, uint64_t base_addr, uint64_t pf_addr, int pf_fill_level, uint32_t prefetch_metadata)
 {
-    if(!prefetch_warmup_complete)
+  //if(!prefetch_warmup_complete)
+  for(int i=0; i<NUM_CPUS; i++)
+    if(!prefetch_warmup_complete[i])
         return 0;
 
     pf_requested++;

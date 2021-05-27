@@ -12,7 +12,7 @@ uint8_t warmup_complete[NUM_CPUS],
         MAX_INSTR_DESTINATIONS = NUM_INSTR_DESTINATIONS,
         knob_cloudsuite = 0,
         knob_low_bandwidth = 0;
-uint8_t prefetch_warmup_complete;
+uint8_t prefetch_warmup_complete[NUM_CPUS];
 
 uint64_t warmup_instructions     = 1000000,
          simulation_instructions = 10000000,
@@ -804,7 +804,7 @@ int main(int argc, char** argv)
         }
 
         warmup_complete[i] = 0;
-        prefetch_warmup_complete = 0;
+        prefetch_warmup_complete[i] = 0;
         //all_warmup_complete = NUM_CPUS;
         simulation_complete[i] = 0;
         current_core_cycle[i] = 0;
@@ -909,9 +909,9 @@ int main(int argc, char** argv)
                 warmup_complete[i] = 1;
                 all_warmup_complete++;
             }
-            if ((prefetch_warmup_complete == 0) && (ooo_cpu[i].num_retired > prefetch_warmup_instructions))
+            if ((prefetch_warmup_complete[i] == 0) && (ooo_cpu[i].num_retired > prefetch_warmup_instructions))
             {
-                prefetch_warmup_complete = 1;
+                prefetch_warmup_complete[i] = 1;
                 all_prefetch_warmup_complete++;
             }
 
@@ -934,7 +934,7 @@ int main(int argc, char** argv)
             */
             
             // simulation complete
-            if ((all_warmup_complete > NUM_CPUS) && (simulation_complete[i] == 0) && (ooo_cpu[i].num_retired >= (ooo_cpu[i].begin_sim_instr + ooo_cpu[i].simulation_instructions))) {
+            if ((all_warmup_complete > NUM_CPUS) && (all_prefetch_warmup_complete > NUM_CPUS) && (simulation_complete[i] == 0) && (ooo_cpu[i].num_retired >= (ooo_cpu[i].begin_sim_instr + ooo_cpu[i].simulation_instructions))) {
                 simulation_complete[i] = 1;
                 ooo_cpu[i].finish_sim_instr = ooo_cpu[i].num_retired - ooo_cpu[i].begin_sim_instr;
                 ooo_cpu[i].finish_sim_cycle = current_core_cycle[i] - ooo_cpu[i].begin_sim_cycle;

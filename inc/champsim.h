@@ -80,7 +80,7 @@ extern uint8_t warmup_complete[NUM_CPUS],
                MAX_INSTR_DESTINATIONS,
                knob_cloudsuite,
                knob_low_bandwidth,
-               prefetch_warmup_complete;
+               prefetch_warmup_complete[NUM_CPUS];
 
 extern uint64_t current_core_cycle[NUM_CPUS], 
                 stall_cycle[NUM_CPUS], 
