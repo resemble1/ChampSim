@@ -834,9 +834,13 @@ int main(int argc, char** argv)
         elapsed_second -= (elapsed_hour*3600 + elapsed_minute*60);
 
         for (int i=0; i<NUM_CPUS; i++) {
+
+            bool pause = prefetch_warmup_complete[i] && (all_prefetch_warmup_complete < NUM_CPUS);
+
             // proceed one cycle
             current_core_cycle[i]++;
 
+            if(pause) continue;
             //cout << "Trying to process instr_id: " << ooo_cpu[i].instr_unique_id << " fetch_stall: " << +ooo_cpu[i].fetch_stall;
             //cout << " stall_cycle: " << stall_cycle[i] << " current: " << current_core_cycle[i] << endl;
 
@@ -884,7 +888,7 @@ int main(int argc, char** argv)
             // heartbeat information
             if (show_heartbeat && (ooo_cpu[i].num_retired >= ooo_cpu[i].next_print_instruction)) {
                 float cumulative_ipc;
-                if (warmup_complete[i])
+                if (prefetch_warmup_complete[i])
                     cumulative_ipc = (1.0*(ooo_cpu[i].num_retired - ooo_cpu[i].begin_sim_instr)) / (current_core_cycle[i] - ooo_cpu[i].begin_sim_cycle);
                 else
                     cumulative_ipc = (1.0*ooo_cpu[i].num_retired) / current_core_cycle[i];
@@ -900,8 +904,8 @@ int main(int argc, char** argv)
             }
 
             // check for deadlock
-            if (ooo_cpu[i].ROB.entry[ooo_cpu[i].ROB.head].ip && (ooo_cpu[i].ROB.entry[ooo_cpu[i].ROB.head].event_cycle + DEADLOCK_CYCLE) <= current_core_cycle[i])
-                print_deadlock(i);
+            //if (ooo_cpu[i].ROB.entry[ooo_cpu[i].ROB.head].ip && (ooo_cpu[i].ROB.entry[ooo_cpu[i].ROB.head].event_cycle + DEADLOCK_CYCLE) <= current_core_cycle[i])
+             //   print_deadlock(i);
 
             // check for warmup
             // warmup complete
