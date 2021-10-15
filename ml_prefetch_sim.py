@@ -11,6 +11,7 @@ default_output_file = './stats.csv'
 default_spec_instrs = 500
 default_gap_instrs = 300
 default_warmup_instrs = 10
+default_printing_period_instrs = 10
 
 default_seed_file = './scripts/seeds.txt'
 
@@ -87,11 +88,17 @@ Options:
         on. By specifying this, these first instructions do not get included in
         the metric computation.
 
+    --stat-printing-period <num-instructions>
+        Number of instructions to simulate between printing out statistics.
+        Defaults to {default_printing_period_instrs}M instructions.
+
     --seed-file <seed-file>
         Path to seed file to load for ChampSim evaluation. Defaults to {seed_file}.
 '''.format(prog=sys.argv[0], default_results_dir=default_results_dir,
     default_spec_instrs=default_spec_instrs, default_gap_instrs=default_gap_instrs,
-    default_warmup_instrs=default_warmup_instrs, seed_file=default_seed_file),
+    default_warmup_instrs=default_warmup_instrs, 
+    default_printing_period_instrs=default_printing_period_instrs,
+    seed_file=default_seed_file),
 
 'eval': '''usage: {prog} eval [--results-dir <results-dir>] [--output-file <output-file>]
 
@@ -187,6 +194,7 @@ def run_command():
     parser.add_argument('--results-dir', default=default_results_dir)
     parser.add_argument('--num-instructions', default=None) #default_spec_instrs if execution_trace[0].isdigit() else default_gap_instrs)
     parser.add_argument('--num-prefetch-warmup-instructions', default=default_warmup_instrs)
+    parser.add_argument('--stat-printing-period', default=default_printing_period_instrs)
     parser.add_argument('--seed-file', default=default_seed_file)
     parser.add_argument('--name', default='from_file')
 
@@ -221,14 +229,16 @@ def run_command():
                 exit(-1)
 
             if seed is not None:
-                cmd = '{binary} -prefetch_warmup_instructions {warm}000000 -simulation_instructions {sim}000000 -seed {seed} -traces {trace} > {results}/{base_trace}-{base_binary}.txt 2>&1'.format(
+                cmd = '{binary} -stat_printing_period {period}000000  -prefetch_warmup_instructions {warm}000000 -simulation_instructions {sim}000000 -seed {seed} -traces {trace} > {results}/{base_trace}-{base_binary}.txt 2>&1'.format(
                     binary=binary, warm=args.num_prefetch_warmup_instructions, sim=args.num_instructions,
                     trace=execution_trace, seed=seed, results=args.results_dir,
+                    period=args.stat_printing_period,
                     base_trace=os.path.basename(execution_trace), base_binary=os.path.basename(binary))
             else:
-                cmd = '{binary} -prefetch_warmup_instructions {warm}000000 -simulation_instructions {sim}000000 -traces {trace} > {results}/{base_trace}-{base_binary}.txt 2>&1'.format(
+                cmd = '{binary} -stat_printing_period {period}000000 -prefetch_warmup_instructions {warm}000000 -simulation_instructions {sim}000000 -traces {trace} > {results}/{base_trace}-{base_binary}.txt 2>&1'.format(
                     binary=binary, warm=args.num_prefetch_warmup_instructions, sim=args.num_instructions,
                     trace=execution_trace, results=args.results_dir, base_trace=os.path.basename(execution_trace),
+                    period=args.stat_printing_period,
                     base_binary=os.path.basename(binary))
 
             print('Running "' + cmd + '"')

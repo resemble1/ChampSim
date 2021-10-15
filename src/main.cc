@@ -17,6 +17,7 @@ uint8_t prefetch_warmup_complete;
 uint64_t warmup_instructions     = 1000000,
          simulation_instructions = 10000000,
          champsim_seed;
+uint64_t stat_printing_period = 10000000;
 uint64_t prefetch_warmup_instructions = 10000000;
 uint8_t all_prefetch_warmup_complete = 0;
 time_t start_time;
@@ -534,6 +535,7 @@ int main(int argc, char** argv)
             {"warmup_instructions", required_argument, 0, 'w'},
             {"simulation_instructions", required_argument, 0, 'i'},
             {"prefetch_warmup_instructions", required_argument, 0, 'p'},
+            {"stat_printing_period", required_argument, 0, 's'},
             {"hide_heartbeat", no_argument, 0, 'h'},
             {"cloudsuite", no_argument, 0, 'c'},
             {"low_bandwidth",  no_argument, 0, 'b'},
@@ -569,6 +571,9 @@ int main(int argc, char** argv)
                 if(prefetch_warmup_instructions < 10000000)
                     prefetch_warmup_instructions = 10000000;
                 break;
+            case 's':
+                stat_printing_period = atol(optarg);
+                break;
             case 'h':
                 show_heartbeat = 0;
                 break;
@@ -597,6 +602,7 @@ int main(int argc, char** argv)
     cout << "Warmup Instructions: " << warmup_instructions << endl;
     cout << "Prefetch Warmup Instructions: " << prefetch_warmup_instructions << endl;
     cout << "Simulation Instructions: " << simulation_instructions << endl;
+    cout << "Stat Printing Period: " << stat_printing_period << endl;
     //cout << "Scramble Loads: " << (knob_scramble_loads ? "ture" : "false") << endl;
     cout << "Number of CPUs: " << NUM_CPUS << endl;
     cout << "LLC sets: " << LLC_SET << endl;
@@ -728,6 +734,7 @@ int main(int argc, char** argv)
         ooo_cpu[i].cpu = i; 
         ooo_cpu[i].warmup_instructions = prefetch_warmup_instructions;
         ooo_cpu[i].simulation_instructions = simulation_instructions;
+        ooo_cpu[i].next_print_instruction = stat_printing_period;
         ooo_cpu[i].begin_sim_cycle = 0; 
         ooo_cpu[i].begin_sim_instr = prefetch_warmup_instructions;
 
@@ -880,7 +887,6 @@ int main(int argc, char** argv)
 		  ooo_cpu[i].read_from_trace();
 		}
 	    }
-
             // heartbeat information
             if (show_heartbeat && (ooo_cpu[i].num_retired >= ooo_cpu[i].next_print_instruction)) {
                 float cumulative_ipc;
@@ -893,7 +899,7 @@ int main(int argc, char** argv)
                 cout << "Heartbeat CPU " << i << " instructions: " << ooo_cpu[i].num_retired << " cycles: " << current_core_cycle[i];
                 cout << " heartbeat IPC: " << heartbeat_ipc << " cumulative IPC: " << cumulative_ipc; 
                 cout << " (Simulation time: " << elapsed_hour << " hr " << elapsed_minute << " min " << elapsed_second << " sec) " << endl;
-                ooo_cpu[i].next_print_instruction += STAT_PRINTING_PERIOD;
+                ooo_cpu[i].next_print_instruction += stat_printing_period;
 
                 ooo_cpu[i].last_sim_instr = ooo_cpu[i].num_retired;
                 ooo_cpu[i].last_sim_cycle = current_core_cycle[i];
