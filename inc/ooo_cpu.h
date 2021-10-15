@@ -3,11 +3,11 @@
 
 #include "cache.h"
 
-// #ifdef CRC2_COMPILE
-// #define STAT_PRINTING_PERIOD 1000000
-// #else
-// #define STAT_PRINTING_PERIOD 1000000 // formerly 10000000
-// #endif
+#ifdef CRC2_COMPILE
+#define STAT_PRINTING_PERIOD 1000000
+#else
+#define STAT_PRINTING_PERIOD 10000000
+#endif
 #define DEADLOCK_CYCLE 1000000
 
 using namespace std;
@@ -113,7 +113,7 @@ class O3_CPU {
         instrs_to_read_this_cycle = 0;
         instrs_to_fetch_this_cycle = 0;
 
-        next_print_instruction = 0; // Won't print until instruction # stat_printing_period.
+        next_print_instruction = STAT_PRINTING_PERIOD;
         num_retired = 0;
 
         inflight_reg_executions = 0;
