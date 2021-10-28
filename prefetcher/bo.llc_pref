@@ -1,5 +1,5 @@
 #include "bo.h" 
-#define DEGREE 2
+#define DEGREE 1 // Degree = 1 for paper comparison, 2 for competition.
 
 void CACHE::llc_prefetcher_initialize() 
 {
