@@ -35,7 +35,7 @@
 // CPU
 #define NUM_CPUS 1
 #define CPU_FREQ 4000
-#define DRAM_IO_FREQ 3200
+#define DRAM_IO_FREQ 1024 // 1024 in Voyager paper (8 GB/s per core * 1 core / 8B (64 bits) per transfer = 1 GT/s = 1024 MT/s)
 #define PAGE_SIZE 4096
 #define LOG2_PAGE_SIZE 12
 
