@@ -562,6 +562,16 @@ void CACHE::handle_read()
                         PROCESSED.add_queue(&RQ.entry[index]);
                 }
 
+                // Update prefetcher UAC statistics, if the read's PC
+                // has had a prior prefetch.
+                auto last_prefetch_addr = prior_pc_prefetch_addr.find(RQ.entry[index].ip);
+                if (last_prefetch_addr != prior_pc_prefetch_addr.end()) { 
+                    //cout << "DEBUG : Found addr " << last_prefetch_addr->second << " for PC " << last_prefetch_addr->first << endl;
+                    if (last_prefetch_addr->second == RQ.entry[index].address)
+                        //cout << "DEBUG : Correct UAC prefetch!" << endl;
+                        pf_uac_correct++;
+                }
+
                 // update prefetcher on load instruction
 		if (RQ.entry[index].type == LOAD) {
 		    if(cache_type == IS_L1I)
@@ -1422,6 +1432,9 @@ int CACHE::prefetch_line(uint64_t ip, uint64_t base_addr, uint64_t pf_addr, int 
             add_pq(&pf_packet);
 
             pf_issued++;
+
+            // Add prefetch's PC to the prior address map
+            prior_pc_prefetch_addr[ip] = pf_addr >> LOG2_BLOCK_SIZE;
 
             return 1;
         }
