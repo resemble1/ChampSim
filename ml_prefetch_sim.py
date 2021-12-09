@@ -268,7 +268,7 @@ def run_command():
         os.system(cmd)
 
 def read_file(path, cache_level='LLC'):
-    expected_keys = ('ipc', 'total_miss', 'useful', 'useless', 'load_miss', 'rfo_miss', 'kilo_inst')
+    expected_keys = ('ipc', 'total_miss', 'useful', 'useless', 'uac_correct', 'iss_prefetches', 'load_miss', 'rfo_miss', 'kilo_inst')
     data = {}
     with open(path, 'r') as f:
         for line in f:
@@ -285,8 +285,10 @@ def read_file(path, cache_level='LLC'):
             elif 'TOTAL' in line:
                 data['total_miss'] = int(line.split()[-1])
             elif 'USEFUL' in line:
-                data['useful'] = int(line.split()[-3])
-                data['useless'] = int(line.split()[-1])
+                data['useful'] = int(line.split()[-6])
+                data['useless'] = int(line.split()[-4])
+                data['uac_correct'] = int(line.split()[-1])
+                data['iss_prefetches'] = int(line.split()[-8])
 
     if not all(key in data for key in expected_keys):
         return None
@@ -299,8 +301,9 @@ def compute_stats(trace, prefetch=None, base=None, baseline_name=None):
 
     pf_data = read_file(prefetch)
 
-    useful, useless, ipc, load_miss, rfo_miss, kilo_inst = (
-        pf_data['useful'], pf_data['useless'], pf_data['ipc'], pf_data['load_miss'], pf_data['rfo_miss'], pf_data['kilo_inst']
+    iss_prefetches, uac_correct, useful, useless, ipc, load_miss, rfo_miss, kilo_inst = (
+        pf_data['iss_prefetches'], pf_data['uac_correct'], pf_data['useful'], pf_data['useless'], 
+        pf_data['ipc'], pf_data['load_miss'], pf_data['rfo_miss'], pf_data['kilo_inst']
     )
     pf_total_miss = load_miss + rfo_miss + useful
     total_miss = pf_total_miss
@@ -316,10 +319,17 @@ def compute_stats(trace, prefetch=None, base=None, baseline_name=None):
         acc = 'N/A'
     else:
         acc = str(useful / (useful + useless) * 100)
-    if total_miss == 0:
+        
+    if total_miss == 0 or base is None:
         cov = 'N/A'
     else:
-        cov = str(useful / total_miss * 100)
+        cov = str((b_total_miss - load_miss - rfo_miss) / b_total_miss * 100) # formerly str(useful / total_miss * 100)
+        
+    if iss_prefetches == 0:
+        uac = 'N/A'
+    else:
+        uac = str(uac_correct / iss_prefetches * 100)
+        
     if base is not None:
         mpki_improv = str((b_mpki - pf_mpki) / b_mpki * 100)
         ipc_improv = str((ipc - b_ipc) / b_ipc * 100)
@@ -327,8 +337,8 @@ def compute_stats(trace, prefetch=None, base=None, baseline_name=None):
         mpki_improv = 'N/A'
         ipc_improv = 'N/A'
 
-    return '{trace},{baseline_name},{acc},{cov},{mpki},{mpki_improv},{ipc},{ipc_improv}'.format(
-        trace=trace, baseline_name=baseline_name, acc=acc, cov=cov, mpki=str(pf_mpki),
+    return '{trace},{baseline_name},{acc},{cov},{uac},{mpki},{mpki_improv},{ipc},{ipc_improv}'.format(
+        trace=trace, baseline_name=baseline_name, acc=acc, cov=cov, uac=uac, mpki=str(pf_mpki),
         mpki_improv=mpki_improv, ipc=str(ipc), ipc_improv=ipc_improv,
     )
 
@@ -351,21 +361,30 @@ def eval_command():
                 if base_fn == fn.split('-hashed_perceptron-')[1].split('-')[3]:
                     traces[trace][base_fn] = os.path.join(args.results_dir, fn)
 
-    stats = ['Trace,Baseline,Accuracy,Coverage,MPKI,MPKI_Improvement,IPC,IPC_Improvement']
+    stats = ['Trace,Baseline,Accuracy,Coverage,UAC,MPKI,MPKI_Improvement,IPC,IPC_Improvement']
     for trace in traces:
         d = traces[trace]
+        print(trace)
+        print(d)
+        
+        baseline_name = 'no' if 'no' in d else 'No Baseline'
         if 'no' in d:
             stats.append(compute_stats(trace, d['no'], baseline_name='no'))
-            stats.append(compute_stats(trace, d['prefetch'], d['no'], baseline_name='yours'))
-        else:
-            stats.append(compute_stats(trace, d['prefetch'], baseline_name='No Baseline'))
-        for fn in baseline_fns:
-            if fn in d:
-                trace_stats = None
-                if fn != 'no' and 'no' in d:
-                    trace_stats = compute_stats(trace, d[fn], d['no'], baseline_name=fn)
-                if trace_stats is not None:
-                    stats.append(trace_stats)
+        for pf in d:
+            if pf != 'no':
+                stats.append(compute_stats(trace, d[pf], d['no'] if 'no' in d else None, baseline_name=pf))
+        #if 'no' in d:
+        #    stats.append(compute_stats(trace, d['no'], baseline_name='no'))
+        #    stats.append(compute_stats(trace, d['prefetch'], d['no'], baseline_name='yours'))
+        #else:
+        #    stats.append(compute_stats(trace, d['prefetch'], baseline_name='No Baseline'))
+        #for fn in baseline_fns:
+        #    if fn in d:
+        #        trace_stats = None
+        #        if fn != 'no' and 'no' in d:
+        #            trace_stats = compute_stats(trace, d[fn], d['no'], baseline_name=fn)
+        #        if trace_stats is not None:
+        #            stats.append(trace_stats)
 
     with open(args.output_file, 'w') as f:
         print('\n'.join(stats), file=f)

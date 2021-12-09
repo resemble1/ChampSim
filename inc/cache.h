@@ -95,7 +95,8 @@ class CACHE : public MEMORY {
              pf_issued,
              pf_useful,
              pf_useless,
-             pf_fill;
+             pf_fill,
+             pf_uac_correct; // Number of times the prefetcher correctly prefetches the next address in the PC-localized stream
 
     // queues
     PACKET_QUEUE WQ{NAME + "_WQ", WQ_SIZE}, // write queue
@@ -112,6 +113,9 @@ class CACHE : public MEMORY {
              roi_miss[NUM_CPUS][NUM_TYPES];
 
     uint64_t total_miss_latency;
+
+    // Track prior prefetch load address of each PC. (for UAC)
+    std::map <uint64_t, uint64_t> prior_pc_prefetch_addr; // Maps PC -> address
     
     // constructor
     CACHE(string v1, uint32_t v2, int v3, uint32_t v4, uint32_t v5, uint32_t v6, uint32_t v7, uint32_t v8) 
@@ -156,6 +160,7 @@ class CACHE : public MEMORY {
         pf_useful = 0;
         pf_useless = 0;
         pf_fill = 0;
+        pf_uac_correct = 0;
     };
 
     // destructor
