@@ -8,85 +8,75 @@ from model import Model
 
 default_results_dir = './results'
 default_output_file = './stats.csv'
-default_spec_instrs = 500
-default_gap_instrs = 300
-default_warmup_instrs = 10
+default_instrs = 500
 default_printing_period_instrs = 10
 
 default_seed_file = './scripts/seeds.txt'
 
-default_base_binary = 'bin/hashed_perceptron-no-no-no-no-lru-1core'
-default_bo_binary = 'bin/hashed_perceptron-no-no-no-bo-lru-1core'
-default_sisb_binary = 'bin/hashed_perceptron-no-no-no-sisb-lru-1core'
-default_sisb_bo_binary = 'bin/hashed_perceptron-no-no-no-sisb_bo-lru-1core'
-default_prefetcher_binary = 'bin/hashed_perceptron-no-no-no-from_file-lru-1core'
+# No prefetcher
+default_lru_binary = 'bin/hashed_perceptron-no-no-no-no-lru-{n_cores}core'
+default_hawkeye_binary = 'bin/hashed_perceptron-no-no-no-no-???-{n_cores}core' # TODO change
 
-baseline_names = ['No Prefetcher', 'Best Offset', 'SISB', 'SISB Best Offset']
-baseline_fns = ['no', 'bo', 'sisb', 'sisb_bo']
-baseline_binaries = [default_base_binary, default_bo_binary, default_sisb_binary, default_sisb_bo_binary]
+baseline_names = ['lru', 'hawkeye']
+baseline_fns = ['lru', '???'] # TODO - Obtain Hawkeye binary
+baseline_binaries = [default_lru_binary, default_hawkeye_binary]
 
 help_str = {
 'help': '''usage: {prog} command [<args>]
 
 Available commands:
-    build            Builds base and prefetcher ChampSim binaries
+    build            Builds ChampSim binaries
     run              Runs ChampSim on specified traces
     eval             Parses and computes metrics on simulation results
-    train            Trains your model
-    generate         Generates the prefetch file
     help             Displays this help message. Command-specific help messages
                      can be displayed with `{prog} help command`
 '''.format(prog=sys.argv[0]),
 
-'build': '''usage: {prog} build [<target>]
+'build': '''usage: {prog} build <target> [-c / --cores <core-count-list>]
 
 Description:
-    {prog} build [<target>]
+    {prog} build <target>
         Builds <target> ChampSim binaries where <target> is one of:
 
-            all            Builds all of the below binaries [default]
-            base           Builds all the baseline binaries
-            prefetcher     Builds just the prefetcher binary that reads from a file
+            all            Builds all the binaries
+            lru            Builds just the lru binary that uses a least-recently-used eviction policy
+            hawkeye        Builds just the Hawkeye byinary that uses a Hawkeye eviction policy
 
-        If <target> is unspecified, this will act as if `{prog} build all` was
-        executed.
+Options:
+    -c / --cores <core-count-list>
+        Specifies a list of cores to build ChampSim variants. A single core
+        version will always be built, but additional versions (e.g. 2-core / 4-core)
+        can be listed here (e.g. using -c 2 4). The ChampSim script is tested up
+        to 8 cores.
 
 Notes:
     Barring updates to the GitHub repository, this will only need to be done once.
 '''.format(prog=sys.argv[0]),
 
-'run': '''usage: {prog} run <execution-trace> [--prefetch <prefetch-file>] [--no-base] [--results-dir <results-dir>]
-                            [--num-instructions <num-instructions>] [--num-prefetch-warmup-instructions <num-warmup-instructions>]
+'run': '''usage: {prog} run <execution-traces> [-c / --cores <num-cores>] [--results-dir <results-dir>]
+                            [--num-instructions <num-instructions>] [--stat-printing-period <num-instructions>]
+                            [--seed-file <seed-file>]
 
 Description:
-    {prog} run <execution-trace>
-        Runs the base ChampSim binary on the specified execution trace.
+    {prog} run <execution-traces>
+        Runs the base ChampSim binary on the specified execution trace(s). If using
+        a multi-core setup, must provide <cores> traces.
 
 Options:
-    --prefetch <prefetch-file>
-        Additionally runs the prefetcher ChampSim binary that issues prefetches
-        according to the file.
-
-    --no-base
-        When specified with --prefetch <prefetch-file>, run only the prefetcher
-        ChampSim binary on the specified execution trace without the baseline
-        ChampSim binaries.
-
+    -c / --cores <num-cores>
+        The number of cores that ChampSim will be simulating. Must provide a <cores>
+        length list of execution traces to the script. By default, one core is used.
+        
+    -t / --targets <list-of-targets>
+        List of targets to run. By default, it will run all targets: {baseline_names}.
+        
     --results-dir <results-dir>
         Specifies what directory to save the ChampSim results file in. This
         defaults to `{default_results_dir}`.
 
     --num-instructions <num-instructions>
         Number of instructions to run the simulation for. Defaults to
-        {default_spec_instrs}M instructions for the spec benchmarks and
-        {default_gap_instrs}M instructions for the gap benchmarks.
-
-    --num-prefetch-warmup-instructions <num-warmup-instructions>
-        Number of instructions in millions to warm-up the simulator for before
-        starting prefetching. Defaults to {default_warmup_instrs}M instructions.
-        This would also be the number of instructions that you train your models
-        on. By specifying this, these first instructions do not get included in
-        the metric computation.
+        {default_instrs}M instructions 
 
     --stat-printing-period <num-instructions>
         Number of instructions to simulate between printing out statistics.
@@ -95,8 +85,8 @@ Options:
     --seed-file <seed-file>
         Path to seed file to load for ChampSim evaluation. Defaults to {seed_file}.
 '''.format(prog=sys.argv[0], default_results_dir=default_results_dir,
-    default_spec_instrs=default_spec_instrs, default_gap_instrs=default_gap_instrs,
-    default_warmup_instrs=default_warmup_instrs, 
+    baseline_names=baseline_names,
+    default_instrs=default_instrs,
     default_printing_period_instrs=default_printing_period_instrs,
     seed_file=default_seed_file),
 
@@ -123,150 +113,128 @@ Note:
     Without the base data, relative performance data comparing MPKI and IPC will
     not be available and the coverage statistic will only be approximate.
 '''.format(prog=sys.argv[0], default_results_dir=default_results_dir, default_output_file=default_output_file),
-
-'train': '''usage: {prog} train <load-trace> [--model <model-path>] [--generate <prefetch-file>] [--num-prefetch-warmup-instructions <num-warmup-instructions>]
-
-Description:
-    {prog} train <load-trace>
-        Trains your model on the given load trace and optionally generates the
-        prefetch file.
-
-Options:
-    --generate <prefetch-file>
-        Outputs the prefetch file with your trained model
-
-    --model <model-path>
-        Saves model to this location. If not specified, the model is not
-        explicitly saved.
-
-    --num-prefetch-warmup-instructions <num-warmup-instructions>
-        Number of instructions in millions to warm-up the simulator for before
-        starting prefetching. Defaults to {default_warmup_instrs}M instructions.
-        This would also be the number of instructions that you train your models
-        on. By specifying this, these first instructions do not get included in
-        the metric computation.
-'''.format(prog=sys.argv[0], default_warmup_instrs=default_warmup_instrs),
-
-'generate': '''usage: {prog} generate <load-trace> <prefetch-file> [--model <model-path>] [--num-prefetch-warmup-instructions <num-warmup-instructions>]
-
-Description:
-    {prog} generate <load-trace> <prefetch-file> --model <model-path>
-        Generates the prefetch file using the specified model
-
-Options:
-    --num-prefetch-warmup-instructions <num-warmup-instructions>
-        Number of instructions in millions to warm-up the simulator for before
-        starting prefetching. Defaults to {default_warmup_instrs}M instructions.
-        This would also be the number of instructions that you train your models
-        on. By specifying this, these first instructions do not get included in
-        the metric computation.
-'''.format(prog=sys.argv[0], default_warmup_instrs=default_warmup_instrs),
 }
 
+
+
+"""
+Build
+"""
 def build_command():
-    build = 'all'
-    if len(sys.argv) > 2:
-        if sys.argv[2] not in ['all', 'base', 'prefetcher']:
-            print('Invalid build target')
-            exit(-1)
-        build = sys.argv[2]
+    if len(sys.argv) < 3:
+        print(help_str['build'])
+        exit(-1)
+        
+    parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
+    parser.add_argument('target', default=None)
+    parser.add_argument('-c', '--cores', type=int, nargs='+', default=[])
+    args = parser.parse_args(sys.argv[2:])
+    
+    print('Building ChampSim versions using args:')
+    print('    Target:', args.target)
+    print('    Cores :', args.cores)
+    
+    if args.target not in ['all'] + baseline_names:
+        print('Invalid build target')
+        exit(-1)
 
-    # Build no prefetcher baseline
-    if build in ['all', 'base']:
+    # Build ChampSims with different replacement policies.
+    cores = set([1] + args.cores)
+    if args.target in baseline_fns:
         for name, fn in zip(baseline_names, baseline_fns):
-            print('Building ' + name + ' ChampSim binary')
-            os.system('./build_champsim.sh hashed_perceptron no no no ' + fn + ' lru 1')
+            for c in cores:
+                print(f'=== Building {name} ChampSim binary ({fn}), {c} core{"s" if c > 1 else ""} ===')
+                os.system(f'./build_champsim.sh hashed_perceptron no no no no {fn} {c}')
 
-    # Build prefetcher
-    if build in ['all', 'prefetcher']:
-        print('Building prefetcher ChampSim binary')
-        os.system('./build_champsim.sh hashed_perceptron no no no from_file lru 1')
-
+                
+            
+"""
+Run
+"""
 def run_command():
     if len(sys.argv) < 3:
         print(help_str['run'])
         exit(-1)
 
     parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
-    parser.add_argument('execution_trace', default=None)
-    parser.add_argument('--prefetch', default=None)
-    parser.add_argument('--no-base', default=False, action='store_true')
+    parser.add_argument('execution_traces', nargs='+', type=str, default=None)
+    parser.add_argument('-c', '--cores', type=int, default=1)
+    parser.add_argument('-t', '--targets', nargs='+', type=str, default=baseline_names)
     parser.add_argument('--results-dir', default=default_results_dir)
-    parser.add_argument('--num-instructions', default=None) #default_spec_instrs if execution_trace[0].isdigit() else default_gap_instrs)
-    parser.add_argument('--num-prefetch-warmup-instructions', default=default_warmup_instrs)
+    parser.add_argument('--num-instructions', default=500) #None) #default_spec_instrs if execution_trace[0].isdigit() else default_gap_instrs)
     parser.add_argument('--stat-printing-period', default=default_printing_period_instrs)
-    parser.add_argument('--seed-file', default=default_seed_file)
+    #parser.add_argument('--seed-file', default=default_seed_file)
     parser.add_argument('--name', default='from_file')
 
     args = parser.parse_args(sys.argv[2:])
+    assert len(args.execution_traces) == args.cores, f'Provided {len(args.execution_traces)} traces for a {args.cores} core simulation.'
+    
+    execution_traces = args.execution_traces
 
-    execution_trace = args.execution_trace
+#     # Seed file
+#     seeds = {}
+#     if not os.path.exists(args.seed_file):
+#         print('Seed file "' + args.seed_file + '" does not exist')
+        
+#     else:
+#         with open(args.seed_file, 'r') as f:
+#             for tr in execution_traces:
+#                 for line in f:
+#                     line = line.strip()
+#                     if line.split()[0] in os.path.basename(tr):
+#                         seeds[tr] = line.split()[1]
+#                         break
+#                 else:
+#                     print('Could not find execution trace "{}" in seed file "{}"'.format(tr, args.seed_file))
+#                     seeds[tr] = None
 
-    if args.num_instructions is None:
-        args.num_instructions = default_spec_instrs if execution_trace[0].isdigit() else default_gap_instrs
-
-    if not os.path.exists(args.seed_file):
-        print('Seed file "' + args.seed_file + '" does not exist')
-        seed = None
-    else:
-        with open(args.seed_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line.split()[0] in os.path.basename(execution_trace):
-                    seed = line.split()[1]
-                    break
-            else:
-                print('Could not find execution trace "{}" in seed file "{}"'.format(execution_trace, args.seed_file))
-                seed = None
-
+    # Generate results directory
     if not os.path.exists(args.results_dir):
         os.makedirs(args.results_dir, exist_ok=True)
-
-    if not args.no_base:
-        for name, binary in zip(baseline_names, baseline_binaries):
-            if not os.path.exists(binary):
-                print(name + ' ChampSim binary not found')
-                exit(-1)
-
-            if seed is not None:
-                cmd = '{binary} -stat_printing_period {period}000000  -prefetch_warmup_instructions {warm}000000 -simulation_instructions {sim}000000 -seed {seed} -traces {trace} > {results}/{base_trace}-{base_binary}.txt 2>&1'.format(
-                    binary=binary, warm=args.num_prefetch_warmup_instructions, sim=args.num_instructions,
-                    trace=execution_trace, seed=seed, results=args.results_dir,
-                    period=args.stat_printing_period,
-                    base_trace=os.path.basename(execution_trace), base_binary=os.path.basename(binary))
-            else:
-                cmd = '{binary} -stat_printing_period {period}000000 -prefetch_warmup_instructions {warm}000000 -simulation_instructions {sim}000000 -traces {trace} > {results}/{base_trace}-{base_binary}.txt 2>&1'.format(
-                    binary=binary, warm=args.num_prefetch_warmup_instructions, sim=args.num_instructions,
-                    trace=execution_trace, results=args.results_dir, base_trace=os.path.basename(execution_trace),
-                    period=args.stat_printing_period,
-                    base_binary=os.path.basename(binary))
-
-            print('Running "' + cmd + '"')
-
-            os.system(cmd)
-
-    if args.prefetch is not None:
-        if not os.path.exists(default_prefetcher_binary):
-            print('Prefetcher ChampSim binary not found')
+        
+    # Generate names for this permutation. (trace names without extensions, joined by hyphen)
+    base_traces = '-'.join(
+        [''.join(os.path.basename(et).split('.')[:-2]) for et in execution_traces]
+    ) 
+       
+    for name, binary in zip(baseline_names, baseline_binaries):
+        binary = binary.format(n_cores = args.cores)
+        base_binary = os.path.basename(binary)
+        
+        # Check if we should actually run this baseline
+        if name not in args.targets:
+            print(f'Skipping {name} ({binary})')
+            continue
+        
+        
+        if not os.path.exists(binary):
+            print(f'{name} ChampSim binary not found, (looked for {binary})')
             exit(-1)
 
-        if seed is not None:
-            cmd = '<{prefetch} {binary} -stat_printing_period {period}000000 -prefetch_warmup_instructions {warm}000000 -simulation_instructions {sim}000000 -seed {seed} -traces {trace} > {results}/{base_trace}-{base_binary}.txt 2>&1'.format(
-                prefetch=args.prefetch, binary=default_prefetcher_binary, warm=args.num_prefetch_warmup_instructions, sim=args.num_instructions,
-                trace=execution_trace, seed=seed, results=args.results_dir,
-                period=args.stat_printing_period,
-                base_trace=os.path.basename(execution_trace), base_binary=args.name)#os.path.basename(default_prefetcher_binary))
-        else:
-            cmd = '<{prefetch} {binary} -stat_printing_period {period}000000 -prefetch_warmup_instructions {warm}000000 -simulation_instructions {sim}000000 -traces {trace} > {results}/{base_trace}-{base_binary}.txt 2>&1'.format(
-                prefetch=args.prefetch, binary=default_prefetcher_binary, warm=args.num_prefetch_warmup_instructions, sim=args.num_instructions,
-                trace=execution_trace, results=args.results_dir, base_trace=os.path.basename(execution_trace),
-                period=args.stat_printing_period,
-                base_binary=args.name)#os.path.basename(default_prefetcher_binary))
+        # if seeds is not None:
+        #     cmd = '{binary} -stat_printing_period {period}000000  -simulation_instructions {sim}000000 -seed {seed} -traces {trace} > {results}/{base_trace}-{base_binary}.txt 2>&1'.format(
+        #         binary=binary, warm=args.num_prefetch_warmup_instructions, sim=args.num_instructions,
+        #         trace=execution_trace, seed=seed, results=args.results_dir,
+        #         period=args.stat_printing_period,
+        #         base_trace=os.path.basename(execution_trace), base_binary=os.path.basename(binary))
+        # else:
+        cmd = '{binary} -stat_printing_period {period}000000 -simulation_instructions {sim}000000 -traces {trace} > {results}/{base_traces}-{base_binary}.txt 2>&1'.format(
+            binary=binary,
+            period=args.stat_printing_period,
+            sim=args.num_instructions,
+            trace=' '.join(execution_traces), 
+            results=args.results_dir, 
+            base_traces=base_traces,
+            base_binary=base_binary
+        )
 
         print('Running "' + cmd + '"')
-
         os.system(cmd)
-
+        
+        
+"""
+Eval
+"""
 def read_file(path, cache_level='LLC'):
     expected_keys = ('ipc', 'total_miss', 'useful', 'useless', 'uac_correct', 'iss_prefetches', 'load_miss', 'rfo_miss', 'kilo_inst')
     data = {}
