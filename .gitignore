@@ -12,3 +12,5 @@ obj/
 .ipynb_checkpoints
 .vscode
 __pycache__
+
+.stats.csv
