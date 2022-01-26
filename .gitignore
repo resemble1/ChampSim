@@ -13,4 +13,4 @@ obj/
 .vscode
 __pycache__
 
-.stats.csv
+stats.csv
