@@ -14,3 +14,4 @@ obj/
 __pycache__
 
 stats.csv
+stats_trace.csv

@@ -124,6 +124,8 @@ Note:
 Build
 """
 def build_command():
+    """Build command
+    """
     if len(sys.argv) < 3:
         print(help_str['build'])
         exit(-1)
@@ -156,6 +158,8 @@ def build_command():
 Run
 """
 def run_command():
+    """Run command
+    """
     if len(sys.argv) < 3:
         print(help_str['run'])
         exit(-1)
@@ -215,21 +219,22 @@ def run_command():
 Eval
 """
 def get_traces_per_cpu(path):
+    """Read a single ChampSim output file and get the traces on each CPU.
+    """
     traces = {}
     with open(path, 'r') as f:
         for line in f:
             if 'CPU' in line and 'runs' in line:
                 core = int(line.split()[1])
-                # Trace name
-                #traces[core] = os.path.basename(line.split()[-1]).split('.')[0] # TODO check this works for all traces.
-                # File name
-                traces[core] = os.path.basename(line.split()[-1]) 
-                # File name
-                #traces[core] = line.split()[-1] 
+                #traces[core] = os.path.basename(line.split()[-1]).split('.')[0] # Trace name - TODO check this works for all traces.
+                traces[core] = os.path.basename(line.split()[-1])  # File name
+                #traces[core] = line.split()[-1] # Full path to file
     return traces
     
     
 def read_file(path, cache_level='LLC'):
+    """Read a single ChampSim output file and parse the results.
+    """
     #expected_keys = ('trace', 'ipc', 'total_miss', 'useful', 'useless', 'uac_correct', 'iss_prefetches', 'load_miss', 'rfo_miss', 'kilo_inst')
     expected_keys = ('trace', 'ipc', 'kilo_inst', 'load_miss', 'rfo_miss', 'total_miss')
     
@@ -276,6 +281,9 @@ def read_file(path, cache_level='LLC'):
 
 
 def compute_stats(trace, baseline_name=''):
+    """Compute additional statistics, after reading the raw
+    data from the trace. Return it as a CSV row.
+    """
     data = read_file(trace)
     if not data:
         return ''
@@ -326,53 +334,76 @@ def build_run_statistics(results_dir, output_file):
     
 def build_trace_statistics(run_stats_file):
     """Build statistics for each trace's fairness,
-    from the run statistics.
+    using already-computed run statistics.
     """
-    run_stats = pd.read_csv(run_stats_file)
+    columns = ['Trace', 'Baseline', 'NumCPUs', 
+               'MinIPC', 'MeanIPC', 'MaxIPC',
+               'MinMPKI', 'MeanMPKI', 'MaxMPKI',
+               'HomoNormMinIPC', 'HomoNormMeanIPC', 'HomoNormMaxIPC',
+               'HomoNormMinMPKI', 'HomoNormMeanMPKI', 'HomoNormMaxMPKI']
     
-    stats = 'Trace,Baseline,NumCPUs,LowestIPC,HighestIPC,MeanIPC,LowestIPCHomoNorm,HighestIPCHomoNorm,MeanIPCHomoNorm'
+    trace_df = pd.DataFrame(columns=columns)
+    run_df = pd.read_csv(run_stats_file)
     
-    
-    t = run_stats.groupby('Trace')
-    for trace in run_stats.Trace.unique():
+    # TODO - Clean up loop to do all three groups / uniques at once.
+    t = run_df.groupby('Trace')
+    for trace in run_df.Trace.unique():
+        
         b = t.get_group(trace).groupby('Baseline')
-        for baseline in run_stats.Baseline.unique():
+        for baseline in run_df.Baseline.unique():
         
             c = b.get_group(baseline).groupby('NumCPUs')
-            for n_cores in run_stats.NumCPUs.unique():
+            for n_cores in run_df.NumCPUs.unique():
                 
-                runs = c.get_group(n_cores)
+                try:
+                    runs = c.get_group(n_cores)
+                except KeyError:
+                    print(f'No runs match trace={trace}, baseline={baseline}, n_cores={n_cores}')
+                    continue
                 
                 
                 homo = runs[runs.HomogeneousMix == True]
-                homo_mean_ipc = homo.IPC.mean() if not homo.empty else np.nan
+                homo_ipc = homo.IPC.mean() if not homo.empty else np.nan # Average homogeneous IPC (over the cores)
+                homo_mpki = homo.MPKI.mean() if not homo.empty else np.nan # Average homogeneous IPC (over the cores)
                     
                 # Raw min, mean, max IPCs
                 min_ipc, mean_ipc, max_ipc = runs.IPC.min(), runs.IPC.mean(), runs.IPC.max()
                 
+                # Raw min, mean, max MPKIs
+                min_mpki, mean_mpki, max_mpki = runs.MPKI.min(), runs.MPKI.mean(), runs.MPKI.max()
+                
                 # Min, mean, max IPCs normalized to homogeneous mix
-                norm_min_ipc = min_ipc - homo_mean_ipc + 1
-                norm_mean_ipc = mean_ipc - homo_mean_ipc + 1
-                norm_max_ipc = max_ipc - homo_mean_ipc + 1
-               
+                norm_min_ipc, norm_mean_ipc, norm_max_ipc = min_ipc / homo_ipc, mean_ipc / homo_ipc, max_ipc / homo_ipc
                 
+                # Min, mean, max MPKIs normalized to homogeneous mix
+                norm_min_mpki, norm_mean_mpki, norm_max_mpki = min_mpki / homo_mpki, mean_mpki / homo_mpki, max_mpki / homo_mpki
                 
-                
-                print(trace, baseline, n_cores, f'norm_min_ipc={norm_min_ipc}, norm_mean_ipc={norm_mean_ipc}, norm_max_ipc={norm_max_ipc}')
-                #print(runs)
+                trace_df.loc[len(trace_df.index)] = [
+                    trace, baseline, n_cores, 
+                    min_ipc, mean_ipc, max_ipc,
+                    min_mpki, mean_mpki, max_mpki,
+                    norm_min_ipc, norm_mean_ipc, norm_max_ipc,
+                    norm_min_mpki, norm_mean_mpki, norm_max_mpki,
+                ]
+    
+    trace_stats_file = run_stats_file.replace('.csv', '') + '_trace.csv'
+    print(f'Saving dataframe to {trace_stats_file}...')
+    trace_df.to_csv(trace_stats_file, index=False)
             
 
 
 
 def eval_command():
+    """Eval command
+    """
     parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
     parser.add_argument('--results-dir', default=default_results_dir)
     parser.add_argument('--output-file', default=default_output_file)
 
     args = parser.parse_args(sys.argv[2:])
     
-    #print('=== Building run statistics... ===')
-    #build_run_statistics(args.results_dir, args.output_file)
+    print('=== Building run statistics... ===')
+    build_run_statistics(args.results_dir, args.output_file)
 
     print('=== Building trace statistics... ===')
     build_trace_statistics(args.output_file)
@@ -384,6 +415,8 @@ def eval_command():
 Help
 """
 def help_command():
+    """Help command
+    """
     # If one of the available help strings, print and exit successfully
     if len(sys.argv) > 2 and sys.argv[2] in help_str:
         print(help_str[sys.argv[2]])
