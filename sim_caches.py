@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 
+"""
+Build singlecore versions of ChampSim, and evaluate 
+LLC replacement policies on different LLC cache sizes.
+"""
+
 import argparse
 import os
 import sys
+import shutil
 from collections import defaultdict
 
 import pandas as pd
 import numpy as np
+from scipy import stats
 from tqdm import tqdm
 
 default_results_dir = './results'
@@ -17,12 +24,20 @@ default_printing_period_instrs = 10
 default_seed_file = './scripts/seeds.txt'
 
 # No prefetcher
-default_lru_binary = 'bin/hashed_perceptron-no-no-no-no-lru-{n_cores}core'
-default_hawkeye_binary = 'bin/hashed_perceptron-no-no-no-no-hawkeye_simple-{n_cores}core'
+default_binary = 'bin/hashed_perceptron-no-no-no-no-{replacement_fn}-{n_cores}core'
+default_binary_sets = 'bin/hashed_perceptron-no-no-no-no-{replacement_fn}-{n_cores}core-{n_sets}llc_sets'
+replacement_names = ['lru', 'hawkeye']
+replacement_fns = ['lru', 'hawkeye_simple']
 
-baseline_names = ['lru', 'hawkeye']
-baseline_fns = ['lru', 'hawkeye_simple']
-baseline_binaries = [default_lru_binary, default_hawkeye_binary]
+# Example:
+#   64 bytes per line
+# x 16 ways per set (i.e. 1 set = 1 KB)
+# x 2048 sets
+# --------
+#   2 MB cache size
+
+# llc_num_sets = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768] # Number of sets
+#              [256 KB, 512 KB, 1 MB, 2 MB, 4 MB, 8 MB, 16 MB, 32 MB]
 
 help_str = {
 'help': '''usage: {prog} command [<args>]
@@ -43,7 +58,7 @@ Description:
 
             all            Builds all the binaries
             lru            Builds just the lru binary that uses a least-recently-used eviction policy
-            hawkeye        Builds just the Hawkeye byinary that uses a Hawkeye eviction policy
+            hawkeye        Builds just the Hawkeye binary that uses a standard Hawkeye eviction policy
 
 Options:
     -c / --cores <core-count-list>
@@ -51,6 +66,14 @@ Options:
         version will always be built, but additional versions (e.g. 2-core / 4-core)
         can be listed here (e.g. using -c 2 4). The ChampSim script is tested up
         to 8 cores.
+        
+        Default: One core only
+        
+    -s / --sets <llc-set-count-list>
+        Specifies a list of set sizes to build ChampSim variants. The default
+        LLC has 2048 sets. (1 set = 1 KB -> 2 MB LLC).
+        
+        Default: 2048 sets only.
 
 Notes:
     Barring updates to the GitHub repository, this will only need to be done once.
@@ -70,8 +93,12 @@ Options:
         The number of cores that ChampSim will be simulating. Must provide a <cores>
         length list of execution traces to the script. By default, one core is used.
         
+    -sets / --sets <num-llc-sets>
+        The number of LLC cache sets that ChampSim will be simulating. By default, 
+        2048 sets are used (if the binary is available).
+        
     -t / --targets <list-of-targets>
-        List of targets to run. By default, it will run all targets: {baseline_names}.
+        List of targets to run. By default, it will run all targets: {replacement_names}.
         
     --results-dir <results-dir>
         Specifies what directory to save the ChampSim results file in. This
@@ -84,11 +111,8 @@ Options:
     --stat-printing-period <num-instructions>
         Number of instructions to simulate between printing out statistics.
         Defaults to {default_printing_period_instrs}M instructions.
-
-    --seed-file <seed-file>
-        Path to seed file to load for ChampSim evaluation. Defaults to {seed_file}.
 '''.format(prog=sys.argv[0], default_results_dir=default_results_dir,
-    baseline_names=baseline_names,
+    replacement_names=replacement_names,
     default_instrs=default_instrs,
     default_printing_period_instrs=default_printing_period_instrs,
     seed_file=default_seed_file),
@@ -123,6 +147,21 @@ Note:
 """
 Build
 """
+def change_llc_sets(cacheh_path, num_sets):
+    """Replace the number of sets in the ChampSim LLC definition."""
+    replacement = ''
+    
+    with open(cacheh_path, 'rt') as f:
+        for l in f:
+            if 'LLC_SET' in l:
+                l = f'#define LLC_SET NUM_CPUS*{num_sets}\n'
+
+            replacement += l
+            
+    with open(cacheh_path, 'wt') as f:
+        print(replacement, file=f)
+
+
 def build_command():
     """Build command
     """
@@ -132,25 +171,63 @@ def build_command():
         
     parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
     parser.add_argument('target', default=None)
-    parser.add_argument('-c', '--cores', type=int, nargs='+', default=[])
+    parser.add_argument('-c', '--cores', type=int, nargs='+', default=[1])
+    parser.add_argument('-s', '--sets', type=int, nargs='+', default=[2048])
     args = parser.parse_args(sys.argv[2:])
     
     print('Building ChampSim versions using args:')
     print('    Target:', args.target)
     print('    Cores :', args.cores)
+    print('    Sets  :', args.sets)
     
-    if args.target not in ['all'] + baseline_names:
+    if args.target not in ['all'] + replacement_names:
         print('Invalid build target')
         exit(-1)
 
     # Build ChampSims with different replacement policies.
     cores = set([1] + args.cores)
+    sets = set(args.sets)
 
-    for name, fn in zip(baseline_names, baseline_fns):
-        if args.target == 'all' or name in args.target:
-            for c in cores:
-                print(f'=== Building {name} ChampSim binary ({fn}), {c} core{"s" if c > 1 else ""} ===')
+    for name, fn in zip(replacement_names, replacement_fns):
+        if not (args.target == 'all' or name in args.target):
+            continue
+            
+        for c in cores:
+            for s in sets:
+                print(f'=== Building {name} ChampSim binary ({fn}), {c} core{"s" if c > 1 else ""}. {s} LLC sets ===')
+
+                # Backup original cache.h file
+                print('Backing up inc/cache.h...')
+                shutil.copyfile('./inc/cache.h', './inc/cache.h.bak')
+
+                # Backup original binary (if one clashes with ChampSim's output)
+                old_binary = default_binary.format(replacement_fn=fn, n_cores=c)
+                new_binary = old_binary + f'-{s}llc_sets'
+                if os.path.exists(old_binary):
+                    print(f'Backing up existing binary {old_binary}...')
+                    shutil.copyfile(old_binary, old_binary + '.bak')
+
+                # Change cache.h file to accomodate our desired number of sets
+                print(f'Changing LLC sets in inc/cache.h to NUM_CPUS*{s} (effectively {c} * {s}, {c*s*16 / 1024} KB)...')
+                change_llc_sets('./inc/cache.h', s)
+
+                # Build ChampSim with modified cache.h
                 os.system(f'./build_champsim.sh hashed_perceptron no no no no {fn} {c}')
+
+                # Restore original cache.h file.
+                print('Restoring inc/cache.h from backup...')
+                shutil.copyfile('./inc/cache.h.bak', './inc/cache.h')
+                os.remove('./inc/cache.h.bak')
+
+                # Rename new binary to reflect LLC sets.
+                print(f'Moving binary to {new_binary}...')
+                shutil.move(old_binary, new_binary)
+
+                # Restore original binary (if one eixsts)
+                if os.path.exists(old_binary + '.bak'):
+                    print(f'Restoring existing binary {old_binary}...')
+                    shutil.copyfile(old_binary + '.bak', old_binary)
+                    os.remove(old_binary + '.bak')
 
                 
             
@@ -166,30 +243,29 @@ def run_command():
 
     parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
     parser.add_argument('execution_traces', nargs='+', type=str, default=None)
+    parser.add_argument('-t', '--targets', nargs='+', type=str, default=replacement_names)
     parser.add_argument('-c', '--cores', type=int, default=1)
-    parser.add_argument('-t', '--targets', nargs='+', type=str, default=baseline_names)
+    parser.add_argument('-s', '--sets', type=int, default=2048)
     parser.add_argument('--results-dir', default=default_results_dir)
     parser.add_argument('--num-instructions', default=500) #None) #default_spec_instrs if execution_trace[0].isdigit() else default_gap_instrs)
-    parser.add_argument('--stat-printing-period', default=default_printing_period_instrs)
-    #parser.add_argument('--seed-file', default=default_seed_file)
-    parser.add_argument('--name', default='from_file')
+    parser.add_argument('--stat-printing-period', default=default_printing_period_instrs) 
 
     args = parser.parse_args(sys.argv[2:])
     assert len(args.execution_traces) == args.cores, f'Provided {len(args.execution_traces)} traces for a {args.cores} core simulation.'
-    
     execution_traces = args.execution_traces
 
     # Generate results directory
-    if not os.path.exists(args.results_dir):
-        os.makedirs(args.results_dir, exist_ok=True)
+    results_dir = args.results_dir #os.path.join(args.results_dir, f'{args.sets}llc_sets')
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir, exist_ok=True)
         
     # Generate names for this permutation. (trace names without extensions, joined by hyphen)
     base_traces = '-'.join(
         [''.join(os.path.basename(et).split('.')[:-2]) for et in execution_traces]
     ) 
        
-    for name, binary in zip(baseline_names, baseline_binaries):
-        binary = binary.format(n_cores = args.cores)
+    for name, fn in zip(replacement_names, replacement_fns):
+        binary = default_binary_sets.format(replacement_fn = fn, n_cores = args.cores, n_sets = args.sets)
         base_binary = os.path.basename(binary)
         
         # Check if we should actually run this baseline
@@ -206,7 +282,7 @@ def run_command():
             period=args.stat_printing_period,
             sim=args.num_instructions,
             trace=' '.join(execution_traces), 
-            results=args.results_dir, 
+            results=results_dir, 
             base_traces=base_traces,
             base_binary=base_binary
         )
@@ -236,7 +312,7 @@ def read_file(path, cache_level='LLC'):
     """Read a single ChampSim output file and parse the results.
     """
     #expected_keys = ('trace', 'ipc', 'total_miss', 'useful', 'useless', 'uac_correct', 'iss_prefetches', 'load_miss', 'rfo_miss', 'kilo_inst')
-    expected_keys = ('trace', 'ipc', 'kilo_inst', 'load_miss', 'rfo_miss', 'total_miss')
+    expected_keys = ('trace', 'is_homogeneous', 'llc_sets', 'ipc', 'kilo_inst', 'load_miss', 'rfo_miss', 'total_miss')
     
     
     #data = defaultdict(lambda: defaultdict(int)) # Indexed by core -> feature
@@ -249,6 +325,9 @@ def read_file(path, cache_level='LLC'):
     # Build other features
     with open(path, 'r') as f:
         for line in f:
+            if 'LLC sets' in line:
+                llc_sets = int(line.split()[2])
+                data['llc_sets'] = llc_sets
             # Finished CPU indicators
             if 'Finished CPU' in line:
                 core = int(line.split()[2])
@@ -280,31 +359,119 @@ def read_file(path, cache_level='LLC'):
 
 
 
-def compute_stats(trace, baseline_name=''):
+def compute_stats(trace_path, baseline_name=''):
     """Compute additional statistics, after reading the raw
     data from the trace. Return it as a CSV row.
     """
-    data = read_file(trace)
+    data = read_file(trace_path)
     if not data:
-        return ''
+        return pd.DataFrame({})
     
     n_cores = max(data['ipc'].keys()) + 1
-    out = ''
+    out = defaultdict(list)
 
     for core in sorted(data['ipc'].keys()):
-        trace, ipc, load_miss, rfo_miss, kilo_inst = (
-            data['trace'][core], data['ipc'][core], data['load_miss'][core], 
+        trace, llc_sets, llc_sets_per_core, ipc, load_miss, rfo_miss, kilo_inst = (
+            data['trace'][core], data['llc_sets'], int(data['llc_sets'] / n_cores), data['ipc'][core], data['load_miss'][core], 
             data['rfo_miss'][core], data['kilo_inst'][core]
         )
         is_homogeneous = data['is_homogeneous']
-        
-        
         mpki = (load_miss + rfo_miss) / kilo_inst
-        out += f'\n{trace},{baseline_name},{core},{n_cores},{is_homogeneous},{mpki},{ipc},{load_miss},{rfo_miss}'
+        
+        out['Trace'].append(trace)
+        out['Baseline'].append(baseline_name)
+        out['CPU'].append(core)
+        out['HomogeneousMix'].append(is_homogeneous)
+        out['NumCPUs'].append(n_cores)
+        out['LLCSets'].append(llc_sets)
+        out['LLCSetsPerCPU'].append(llc_sets_per_core)
+        out['MPKI'].append(mpki)
+        out['IPC'].append(ipc)
+        out['CPI'].append(1 / ipc)
+        out['LoadMisses'].append(load_miss)
+        out['RFOMisses'].append(rfo_miss)
+        out['RunName'].append(os.path.basename(trace_path))
+
+    return pd.DataFrame(out)
+
+
+def add_homo_norm_data(df, target):
+    """Compute the homogeneous-mix run normalized
+    statistics for each core/run, after other stats
+    have been calcuated.
+    """
+    df = df.reset_index(drop=True)
     
-    return out
+    # Get Homo Norm of Targets
+    for i, core in df.iterrows():
+        homo_run = df[
+            (df.Trace == core.Trace) & 
+            (df.Baseline == core.Baseline) & 
+            (df.NumCPUs == core.NumCPUs) & 
+            (df.LLCSetsPerCPU == core.LLCSetsPerCPU) & 
+            (df.HomogeneousMix == True)
+        ]
+        df.loc[i, f'HomoNorm{target}'] = core[target] / homo_run[target].mean()
+
+    # Get Homo Norm Target statistics for each run
+    runs = df.groupby('RunName')
+    for run_name in df.RunName.unique():
+        run = runs.get_group(run_name)
+        df.loc[run.index, f'HomoNorm{target}Sum'] = np.sum(run[f'HomoNorm{target}'])
+        df.loc[run.index, f'HomoNorm{target}Hmean'] = stats.hmean(run[f'HomoNorm{target}'])
+        df.loc[run.index, f'HomoNorm{target}Var'] = np.var(run[f'HomoNorm{target}'])
+        df.loc[run.index, f'HomoNorm{target}Std'] = np.std(run[f'HomoNorm{target}'])
+        df.loc[run.index, f'HomoNorm{target}MSE'] = ((run[f'HomoNorm{target}'] - 1)**2).mean() # Squared error
+        
+        print('Run:', run_name)
+        print(f'    HomoNorm{target}s:', run[f'HomoNorm{target}'].tolist())
+        print('    Sum  :', df.loc[run.index, f'HomoNorm{target}Sum'].tolist()[0])
+        print('    HMean:', df.loc[run.index, f'HomoNorm{target}Hmean'].tolist()[0])
+        print('    Var  :', df.loc[run.index, f'HomoNorm{target}Var'].tolist()[0])
+        print('    Std  :', df.loc[run.index, f'HomoNorm{target}Std'].tolist()[0])
+        print('    MSE  :', df.loc[run.index, f'HomoNorm{target}MSE'].tolist()[0])
+    
+    return df
 
 
+def add_single_norm_data(df, target):
+    """Compute the single-core-run normalized
+    statistics for each core/run, after other stats
+    have been calcuated.
+    """
+    df = df.reset_index(drop=True)
+    
+    # Get Single Norm of Target
+    for i, core in df.iterrows():
+        single_run = df[
+            (df.Trace == core.Trace) & 
+            (df.Baseline == core.Baseline) & 
+            (df.NumCPUs == 1) & 
+            (df.LLCSetsPerCPU == core.LLCSetsPerCPU) & 
+            (df.HomogeneousMix == True)
+        ]
+        df.loc[i, f'SingleNorm{target}'] = core[target] / single_run[target].mean()
+
+    # Get Single Norm Target statistics for each run
+    runs = df.groupby('RunName')
+    for run_name in df.RunName.unique():
+        run = runs.get_group(run_name)
+        df.loc[run.index, f'SingleNorm{target}Sum'] = np.sum(run[f'SingleNorm{target}'])
+        df.loc[run.index, f'SingleNorm{target}Hmean'] = stats.hmean(run[f'SingleNorm{target}'])
+        df.loc[run.index, f'SingleNorm{target}Var'] = np.var(run[f'SingleNorm{target}'])
+        df.loc[run.index, f'SingleNorm{target}Std'] = np.std(run[f'SingleNorm{target}'])
+        df.loc[run.index, f'SingleNorm{target}MSE'] = ((run[f'SingleNorm{target}'] - 1)**2).mean() # Squared error
+        
+        print(f'    SingleNorm{target}s:', run[f'SingleNorm{target}'].tolist())
+        print('    Sum  :', df.loc[run.index, f'SingleNorm{target}Sum'].tolist()[0])
+        print('    HMean:', df.loc[run.index, f'SingleNorm{target}Hmean'].tolist()[0])
+        print('    Var  :', df.loc[run.index, f'SingleNorm{target}Var'].tolist()[0])
+        print('    Std  :', df.loc[run.index, f'SingleNorm{target}Std'].tolist()[0])
+        print('    MSE  :', df.loc[run.index, f'SingleNorm{target}MSE'].tolist()[0])
+    
+    return df
+            
+    
 
 def build_run_statistics(results_dir, output_file):
     """Build statistics for each run, per-core.
@@ -314,21 +481,33 @@ def build_run_statistics(results_dir, output_file):
         trace = fn.split('-hashed_perceptron-')[0]
         if trace not in traces:
             traces[trace] = {}
-        for base_fn in baseline_fns:
-            if base_fn == fn.split('-hashed_perceptron-')[1].split('-')[4]:
-                traces[trace][base_fn] = os.path.join(results_dir, fn)
+            
+        repl_fn = fn.split('-hashed_perceptron-')[1].split('-')[4]
+        llc_sets = int(fn.split('-hashed_perceptron-')[1].split('-')[6].replace('llc_sets', '').replace('.txt', ''))
 
-                
-    
-    stats = 'Trace,Baseline,CPU,NumCPUs,HomogeneousMix,MPKI,IPC,LoadMisses,RFOMisses'
+        traces[trace][(repl_fn, llc_sets)] = os.path.join(results_dir, fn)
+
+    columns = ['Trace', 'Baseline', 'CPU', 'NumCPUs',
+               'LLCSets', 'LLCSetsPerCPU',
+               'HomogeneousMix', 'MPKI', 'IPC', 'CPI',
+               'LoadMisses', 'RFOMisses', 'RunName']
+    run_df = pd.DataFrame(columns=columns)
     for trace in tqdm(traces, dynamic_ncols=True, unit='trace'):
         d = traces[trace]
+        for baseline, llc_sets in d:
+            run_df = run_df.append(compute_stats(d[(baseline, llc_sets)], baseline_name=baseline))
 
-        for baseline in d:
-            stats += compute_stats(d[baseline], baseline_name=baseline)
-
-    with open(output_file, 'w') as f:
-        print(stats, file=f)
+    # Get the Homo-normalized statistics for each run
+    run_df = add_homo_norm_data(run_df, 'IPC')
+    run_df = add_homo_norm_data(run_df, 'CPI')
+    run_df = add_homo_norm_data(run_df, 'MPKI')
+    
+    # Get the Single-normalized statistics for each run
+    run_df = add_single_norm_data(run_df, 'IPC')
+    run_df = add_single_norm_data(run_df, 'CPI')
+    run_df = add_single_norm_data(run_df, 'MPKI')
+      
+    run_df.to_csv(output_file, index=False)
     
     
     
@@ -337,6 +516,7 @@ def build_trace_statistics(run_stats_file):
     using already-computed run statistics.
     """
     columns = ['Trace', 'Baseline', 'NumCPUs', 
+               'LLCSets', 'LLCSetsPerCPU',
                'MinIPC', 'MeanIPC', 'MaxIPC',
                'MinMPKI', 'MeanMPKI', 'MaxMPKI',
                'HomoNormMinIPC', 'HomoNormMeanIPC', 'HomoNormMaxIPC',
@@ -351,47 +531,37 @@ def build_trace_statistics(run_stats_file):
         
         b = t.get_group(trace).groupby('Baseline')
         for baseline in run_df.Baseline.unique():
-        
-            c = b.get_group(baseline).groupby('NumCPUs')
-            for n_cores in run_df.NumCPUs.unique():
-                
-                try:
-                    runs = c.get_group(n_cores)
-                except KeyError:
-                    print(f'No runs match trace={trace}, baseline={baseline}, n_cores={n_cores}')
-                    continue
-                
-                
-                homo = runs[runs.HomogeneousMix == True]
-                homo_ipc = homo.IPC.mean() if not homo.empty else np.nan # Average homogeneous IPC (over the cores)
-                homo_mpki = homo.MPKI.mean() if not homo.empty else np.nan # Average homogeneous IPC (over the cores)
-                    
-                # Raw min, mean, max IPCs
-                min_ipc, mean_ipc, max_ipc = runs.IPC.min(), runs.IPC.mean(), runs.IPC.max()
-                
-                # Raw min, mean, max MPKIs
-                min_mpki, mean_mpki, max_mpki = runs.MPKI.min(), runs.MPKI.mean(), runs.MPKI.max()
-                
-                # Min, mean, max IPCs normalized to homogeneous mix
-                norm_min_ipc, norm_mean_ipc, norm_max_ipc = min_ipc / homo_ipc, mean_ipc / homo_ipc, max_ipc / homo_ipc
-                
-                # Min, mean, max MPKIs normalized to homogeneous mix
-                norm_min_mpki, norm_mean_mpki, norm_max_mpki = min_mpki / homo_mpki, mean_mpki / homo_mpki, max_mpki / homo_mpki
-                
-                trace_df.loc[len(trace_df.index)] = [
-                    trace, baseline, n_cores, 
-                    min_ipc, mean_ipc, max_ipc,
-                    min_mpki, mean_mpki, max_mpki,
-                    norm_min_ipc, norm_mean_ipc, norm_max_ipc,
-                    norm_min_mpki, norm_mean_mpki, norm_max_mpki,
-                ]
+            
+            s = b.get_group(baseline).groupby('LLCSetsPerCPU')
+            for llc_sets in run_df.LLCSets.unique():
+                c = s.get_group(llc_sets).groupby('NumCPUs')
+                for n_cores in run_df.NumCPUs.unique():
+
+                    try:
+                        runs = c.get_group(n_cores)
+                    except KeyError:
+                        print(f'No runs match trace={trace}, llc_sets_per_cpu={llc_sets}, baseline={baseline}, n_cores={n_cores}')
+                        continue     
+
+                    homo = runs[runs.HomogeneousMix == True]
+                    homo_ipc = homo.IPC.mean() if not homo.empty else np.nan # Average homogeneous IPC (over the cores)
+                    homo_mpki = homo.MPKI.mean() if not homo.empty else np.nan # Average homogeneous IPC (over the cores)
+
+                    norm_ipcs = runs.IPC / homo_ipc    # IPCs normalized to homogeneous mix
+                    norm_mpkis = runs.MPKI / homo_mpki # MPKIs normalized to homogeneous mix
+
+                    trace_df.loc[len(trace_df.index)] = [
+                        trace, baseline, n_cores, llc_sets * n_cores, llc_sets,
+                        runs.IPC.min(), runs.IPC.mean(), runs.IPC.max(),
+                        runs.MPKI.min(), runs.MPKI.mean(), runs.MPKI.max(),
+                        norm_ipcs.min(), norm_ipcs.mean(), norm_ipcs.max(),
+                        norm_mpkis.min(), norm_mpkis.mean(), norm_mpkis.max(),
+                    ]
     
     trace_stats_file = run_stats_file.replace('.csv', '') + '_trace.csv'
     print(f'Saving dataframe to {trace_stats_file}...')
     trace_df.to_csv(trace_stats_file, index=False)
             
-
-
 
 def eval_command():
     """Eval command
