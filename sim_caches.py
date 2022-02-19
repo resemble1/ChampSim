@@ -284,7 +284,7 @@ def build_command():
         exit(-1)
 
     # Build ChampSims with different replacement policies.
-    cores = set([1] + args.cores)
+    cores = set(args.cores)
     sets = set(args.sets)
 
     for name, fn in zip(replacement_names, replacement_fns):
@@ -294,10 +294,9 @@ def build_command():
             continue
 
         if name == 'hawkeye_split':
-            c = cores[0]
-            it = [iter(args.hawkeye_splits)] * c
+            c = list(cores)[0]
             for s in sets:
-                for split in it:
+                for split in zip(*[iter(args.hawkeye_splits)]*c):
                     build_config_hawkeye_split(c, s, split)
 
         else:
