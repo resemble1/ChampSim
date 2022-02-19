@@ -290,7 +290,7 @@ def build_command():
     for name, fn in zip(replacement_names, replacement_fns):
         if (args.target == 'all' and name == 'hawkeye_split'): # Do not build hawkeye_split when building "all" replacement policies
             continue
-        if not (args.target == 'all' or name in args.target):  # Do not build a replacement policy if it's not specified (or all)
+        if not (args.target == 'all' or name == args.target):  # Do not build a replacement policy if it's not specified (or all)
             continue
 
         if name == 'hawkeye_split':
