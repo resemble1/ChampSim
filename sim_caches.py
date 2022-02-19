@@ -178,7 +178,7 @@ def change_hawkeye_splits(hawkeye_split_path, split):
     replacement = ''
     with open(hawkeye_split_path, 'rt') as f:
         for line in f:
-            if 'OPTGEN_PERCPU_WAYS' in line:
+            if 'const int OPTGEN_PERCPU_WAYS' in line:
                 split_str = '{' + ', '.join([str(i) for i in split]) + '}'
                 line = f'const int OPTGEN_PERCPU_WAYS[] = {split_str};\n'
             replacement += line

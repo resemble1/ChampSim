@@ -27,11 +27,12 @@
 uint32_t rrpv[LLC_SETS][LLC_WAYS];
 
 
-uint64_t perset_mytimer[LLC_SETS];
+uint64_t perset_mytimer[NUM_CPUS][LLC_SETS];
 
 // Signatures for sampled sets; we only use 64 of these
 // Budget = 64 sets * 16 ways * 12-bit signature per line = 1.5B
-uint64_t signatures[LLC_SETS][LLC_WAYS];
+// Allocate a signature set per core.
+uint64_t signatures[NUM_CPUS][LLC_SETS][LLC_WAYS];
 
 // Hawkeye Predictors for demand and prefetch requests
 // Predictor with 2K entries and 5-bit counter per entry
@@ -49,7 +50,6 @@ HAWKEYE_PC_PREDICTOR* demand_predictor[NUM_CPUS];
 // per-set occupancy vectors; we only use 64 of these
 // Allocate a separate OPTgen per core, assuming a different share of the LLC (number of ways out of LLC_WAYS).
 OPTgen perset_optgen[NUM_CPUS][LLC_SETS]; 
-const int OPTGEN_PERCPU_WAYS[] = {3, 13}; // Change this to alter the soft partition.
 
 #include <math.h>
 #define bitmask(l) (((l) == 64) ? (unsigned long long)(-1LL) : ((1LL << (l))-1LL))
@@ -65,32 +65,35 @@ const int OPTGEN_PERCPU_WAYS[] = {3, 13}; // Change this to alter the soft parti
 
 // Sampler to track 8x cache history for sampled sets
 // 2800 entris * 4 bytes per entry = 11.2KB
+// Allocate a sampler per core.
 #define SAMPLED_CACHE_SIZE 2800
-map<uint64_t, ADDR_INFO> addr_history; // Sampler
+map<uint64_t, ADDR_INFO> addr_history[NUM_CPUS]; // Sampler
 
 
 // initialize replacement state
 void CACHE::llc_initialize_replacement()
 {
+    const int OPTGEN_PERCPU_WAYS[] = {3, 13}; // Change this to alter the soft partition.
     for(int k=0; k<NUM_CPUS; k++) {
         for (int i=0; i<LLC_SETS; i++) {
             for (int j=0; j<LLC_WAYS; j++) {
                 rrpv[i][j] = maxRRPV;
-                signatures[i][j] = 0;
+                signatures[k][i][j] = 0;
             }
 
-            perset_mytimer[i] = 0;
+            perset_mytimer[k][i] = 0;
             perset_optgen[k][i].init(OPTGEN_PERCPU_WAYS[k] - 2);
         }
 
         demand_predictor[k] = new HAWKEYE_PC_PREDICTOR();
+        addr_history[k].clear();
     }
-    addr_history.clear();
+
    
     // Print split of predictor
     cout << "Initialize Split Hawkeye state" << endl;
     for (int k = 0; k < NUM_CPUS; k++) {
-        cout << "OPTgen core " << k << ": " << OPTGEN_PERCPU_WAYS[k] << " ways" << endl;
+        cout << "OPTgen core " << k << ": " << perset_optgen[k][0].CACHE_SIZE << " ways" << endl;
     }
 }
 
@@ -118,7 +121,7 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
     assert (lru_victim != -1);
     //The predictor is trained negatively on LRU evictions
     if( SAMPLED_SET(set) )
-        demand_predictor[cpu]->decrement(signatures[set][lru_victim]);
+        demand_predictor[cpu]->decrement(signatures[cpu][set][lru_victim]);
     return lru_victim;
 
     // WE SHOULD NOT REACH HERE
@@ -126,12 +129,12 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
     return 0;
 }
 
-void replace_addr_history_element()
+void replace_addr_history_element(uint32_t cpu)
 {
     uint64_t lru_addr = 0;
     uint64_t lru_time = 10000000;
     
-    for(map<uint64_t, ADDR_INFO>::iterator it=addr_history.begin(); it != addr_history.end(); it++)
+    for(map<uint64_t, ADDR_INFO>::iterator it=addr_history[cpu].begin(); it != addr_history[cpu].end(); it++)
     {
         if((it->second).last_quanta < lru_time)
         {
@@ -140,7 +143,7 @@ void replace_addr_history_element()
         }
     }
     assert(lru_addr != 0);
-    addr_history.erase(lru_addr);
+    addr_history[cpu].erase(lru_addr);
 }
 
 // called on every cache hit and cache fill
@@ -156,24 +159,24 @@ void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
     if(SAMPLED_SET(set))
     {
         //The current timestep 
-        uint64_t curr_quanta = perset_mytimer[set];
+        uint64_t curr_quanta = perset_mytimer[cpu][set];
 
         // This line has been used before. Since the right end of a usage interval is always 
         //a demand, ignore prefetches
-        if(addr_history.find(paddr) != addr_history.end())
+        if(addr_history[cpu].find(paddr) != addr_history[cpu].end())
         {
-            uint64_t last_quanta = addr_history[paddr].last_quanta;
-            assert(curr_quanta >= addr_history[paddr].last_quanta);
+            uint64_t last_quanta = addr_history[cpu][paddr].last_quanta;
+            assert(curr_quanta >= addr_history[cpu][paddr].last_quanta);
 
             //Train the predictor positively because OPT would have cached this line
             if( perset_optgen[cpu][set].should_cache(curr_quanta, last_quanta))
             {
-                demand_predictor[cpu]->increment(addr_history[paddr].PC);
+                demand_predictor[cpu]->increment(addr_history[cpu][paddr].PC);
             }
             else
             {
                 //Train the predictor negatively because OPT would not have cached this line
-                demand_predictor[cpu]->decrement(addr_history[paddr].PC);
+                demand_predictor[cpu]->decrement(addr_history[cpu][paddr].PC);
             }
             //Some maintenance operations for OPTgen
             perset_optgen[cpu][set].add_access(curr_quanta);
@@ -183,13 +186,13 @@ void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
         {
 #ifdef SAMPLING
             // Find a victim from the sampled cache if we are sampling
-            assert(addr_history.size() <= SAMPLED_CACHE_SIZE);
-            if(addr_history.size() == SAMPLED_CACHE_SIZE) 
-                replace_addr_history_element();
-            assert(addr_history.size() < SAMPLED_CACHE_SIZE);
+            assert(addr_history[cpu].size() <= SAMPLED_CACHE_SIZE);
+            if(addr_history[cpu].size() == SAMPLED_CACHE_SIZE) 
+                replace_addr_history_element(cpu);
+            assert(addr_history[cpu].size() < SAMPLED_CACHE_SIZE);
 #endif
             //Initialize a new entry in the sampler
-            addr_history[paddr].init(curr_quanta);
+            addr_history[cpu][paddr].init(curr_quanta);
             perset_optgen[cpu][set].add_access(curr_quanta);
         }
 
@@ -198,16 +201,16 @@ void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
 
         // Update the sampler with the timestamp, PC and our prediction
         // For prefetches, the PC will represent the trigger PC
-        addr_history[paddr].update(perset_mytimer[set], ip, new_prediction);
-        addr_history[paddr].lru = 0;
+        addr_history[cpu][paddr].update(perset_mytimer[cpu][set], ip, new_prediction);
+        addr_history[cpu][paddr].lru = 0;
 
         //Increment the set timer
-        perset_mytimer[set] = (perset_mytimer[set]+1);
+        perset_mytimer[cpu][set] = (perset_mytimer[cpu][set]+1);
     }
 
     bool new_prediction = demand_predictor[cpu]->get_prediction (ip);
 
-    signatures[set][way] = ip;
+    signatures[cpu][set][way] = ip;
 
     //Set RRIP values and age cache-friendly line
     if(!new_prediction)
