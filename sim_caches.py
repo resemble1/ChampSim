@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-Build singlecore versions of ChampSim, and evaluate 
+Build singlecore versions of ChampSim, and evaluate
 LLC replacement policies on different LLC cache sizes.
 """
 
@@ -26,8 +26,8 @@ default_seed_file = './scripts/seeds.txt'
 # No prefetcher
 default_binary = 'bin/hashed_perceptron-no-no-no-no-{replacement_fn}-{n_cores}core'
 default_binary_sets = 'bin/hashed_perceptron-no-no-no-no-{replacement_fn}-{n_cores}core-{n_sets}llc_sets'
-replacement_names = ['lru', 'hawkeye']
-replacement_fns = ['lru', 'hawkeye_simple']
+replacement_names = ['lru', 'hawkeye', 'hawkeye_split']
+replacement_fns = ['lru', 'hawkeye_simple', 'hawkeye_split']
 
 # Example:
 #   64 bytes per line
@@ -56,9 +56,10 @@ Description:
     {prog} build <target>
         Builds <target> ChampSim binaries where <target> is one of:
 
-            all            Builds all the binaries
+            all            Builds lru and regular Hawkeye binaries.
             lru            Builds just the lru binary that uses a least-recently-used eviction policy
             hawkeye        Builds just the Hawkeye binary that uses a standard Hawkeye eviction policy
+            hawkeye_split  Builds just the Hawkeye Split binary (need to pass splits to --hawkeye_splits)
 
 Options:
     -c / --cores <core-count-list>
@@ -66,14 +67,22 @@ Options:
         version will always be built, but additional versions (e.g. 2-core / 4-core)
         can be listed here (e.g. using -c 2 4). The ChampSim script is tested up
         to 8 cores.
-        
+
         Default: One core only
-        
+
     -s / --sets <llc-set-count-list>
         Specifies a list of set sizes to build ChampSim variants. The default
         LLC has 2048 sets. (1 set = 1 KB -> 2 MB LLC).
-        
+
         Default: 2048 sets only.
+
+    --hawkeye_splits <hawkeye_split_list>
+        Specifies a list of way-splits to build Split Hawkeye variants. Only one core
+        configuration can be built at a time. Pass in a list of <core-count> * <num_split>
+        integers to build <num_split> versions of Split Hawkeye.
+
+        Example: 3-13 split, 8-8 split on 2-core ChampSim: 3 13 8 8
+        Default: 1 / <core-count> for all core counts
 
 Notes:
     Barring updates to the GitHub repository, this will only need to be done once.
@@ -92,21 +101,21 @@ Options:
     -c / --cores <num-cores>
         The number of cores that ChampSim will be simulating. Must provide a <cores>
         length list of execution traces to the script. By default, one core is used.
-        
+
     -sets / --sets <num-llc-sets>
-        The number of LLC cache sets that ChampSim will be simulating. By default, 
+        The number of LLC cache sets that ChampSim will be simulating. By default,
         2048 sets are used (if the binary is available).
-        
+
     -t / --targets <list-of-targets>
         List of targets to run. By default, it will run all targets: {replacement_names}.
-        
+
     --results-dir <results-dir>
         Specifies what directory to save the ChampSim results file in. This
         defaults to `{default_results_dir}`.
 
     --num-instructions <num-instructions>
         Number of instructions to run the simulation for. Defaults to
-        {default_instrs}M instructions 
+        {default_instrs}M instructions
 
     --stat-printing-period <num-instructions>
         Number of instructions to simulate between printing out statistics.
@@ -147,19 +156,103 @@ Note:
 """
 Build
 """
-def change_llc_sets(cacheh_path, num_sets):
+def change_llc_sets(cacheh_path, num_cpus, num_sets):
     """Replace the number of sets in the ChampSim LLC definition."""
-    replacement = ''
-    
-    with open(cacheh_path, 'rt') as f:
-        for l in f:
-            if 'LLC_SET' in l:
-                l = f'#define LLC_SET NUM_CPUS*{num_sets}\n'
+    print(f'Changing LLC sets in inc/cache.h to NUM_CPUS*{num_sets} (effectively {num_cpus} * {num_sets}, {num_cpus*num_sets*16 / 1024} KB)...')
 
-            replacement += l
-            
+    replacement = ''
+    with open(cacheh_path, 'rt') as f:
+        for line in f:
+            if 'LLC_SET' in line:
+                line = f'#define LLC_SET NUM_CPUS*{num_sets}\n'
+            replacement += line
+
     with open(cacheh_path, 'wt') as f:
         print(replacement, file=f)
+
+
+def change_hawkeye_splits(hawkeye_split_path, split):
+    """Replace the split in the Hawkeye Split LLC replacement definition."""
+    print(f'Changing split in replacement/hawkeye_split.llc_repl to {split}...')
+
+    replacement = ''
+    with open(hawkeye_split_path, 'rt') as f:
+        for line in f:
+            if 'OPTGEN_PERCPU_WAYS' in line:
+                split_str = '{' + ', '.join([str(i) for i in split]) + '}'
+                line = f'const int OPTGEN_PERCPU_WAYS[] = {split_str};\n'
+            replacement += line
+
+    with open(hawkeye_split_path, 'wt') as f:
+        print(replacement, file=f)
+
+
+def build_binary(replacement_fn, num_cpus):
+    os.system(f'./build_champsim.sh hashed_perceptron no no no no {replacement_fn} {num_cpus}')
+
+
+def backup_file(path):
+    if os.path.exists(path):
+        print(f'Backing up {path}...')
+        shutil.copyfile(path, path + '.bak')
+
+
+def restore_file(path):
+    if os.path.exists(path + '.bak'):
+        print(f'Restoring {path} from backup...')
+        shutil.copyfile(path + '.bak', path)
+        os.remove(path + '.bak')
+
+
+def move_file(old_path, new_path):
+    if os.path.exists(old_path):
+        print(f'Moving {old_path} to {new_path}...')
+        shutil.move(old_path, new_path)
+
+
+def build_config(replacement_fn, num_cpus, num_sets):
+    print(f'=== Building {replacement_fn} ChampSim binary, {num_cpus} core{"s" if num_cpus > 1 else ""}, {num_sets} LLC sets ===')
+
+    # Backup files
+    backup_file('./inc/cache.h') # Backup original cache.h file
+    old_binary = default_binary.format(replacement_fn=replacement_fn, n_cores=num_cpus)
+    new_binary = old_binary + f'-{num_sets}llc_sets'
+    backup_file(old_binary)      # Backup original binary (if one clashes with ChampSim's output)
+
+    # Modify files and build
+    change_llc_sets('./inc/cache.h', num_cpus, num_sets) # Change cache.h file to accomodate desired number of sets
+    build_binary(replacement_fn, num_cpus)               # Build ChampSim with modified cache.h
+    move_file(old_binary, new_binary)                    # Rename new binary to reflect changes.
+
+    # Restore backups
+    restore_file('./inc/cache.h')                        # Restore original cache.h file.
+    restore_file(old_binary)                             # Restore original binary (if one exists)
+
+
+def build_config_hawkeye_split(num_cpus, num_sets, split):
+    print(f'=== Building hawkeye_split ChampSim binary, {num_cpus} core{"s" if num_cpus > 1 else ""}, {num_sets} LLC sets, split {split} ===')
+
+    assert len(split) == num_cpus, f'Need to provide {num_cpus} parameters for a split on {num_cpus} CPUs.'
+    replacement_fn = 'hawkeye_split'
+    split_str = '_'.join([str(i) for i in split])
+
+    # Backup files
+    backup_file('./inc/cache.h')                         # Backup original cache.h file
+    backup_file('./replacement/hawkeye_split.llc_repl')  # Backup original hawkeye_split.llc_repl file
+    old_binary = default_binary.format(replacement_fn=replacement_fn, n_cores=num_cpus)
+    new_binary = old_binary.replace('hawkeye_split', f'hawkeye_split_{split_str}') + f'-{num_sets}llc_sets'
+    backup_file(old_binary)                              # Backup original binary (if one clashes with ChampSim's output)
+
+    # Modify files and build
+    change_llc_sets('./inc/cache.h', num_cpus, num_sets) # Change cache.h file to accomodate desired number of sets
+    change_hawkeye_splits('./replacement/hawkeye_split.llc_repl', split)
+    build_binary(replacement_fn, num_cpus)               # Build ChampSim with modified cache.h
+    move_file(old_binary, new_binary)                    # Rename new binary to reflect changes.
+
+    # Restore backups
+    restore_file('./inc/cache.h')                        # Restore original cache.h file.
+    restore_file('./replacement/hawkeye_split.llc_repl') # Restore original hawkeye_split.llc_repl file.
+    restore_file(old_binary)                             # Restore original binary (if one exists)
 
 
 def build_command():
@@ -168,18 +261,24 @@ def build_command():
     if len(sys.argv) < 3:
         print(help_str['build'])
         exit(-1)
-        
+
     parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
     parser.add_argument('target', default=None)
     parser.add_argument('-c', '--cores', type=int, nargs='+', default=[1])
     parser.add_argument('-s', '--sets', type=int, nargs='+', default=[2048])
+    parser.add_argument('--hawkeye_splits', type=int, nargs='+', default=None)
     args = parser.parse_args(sys.argv[2:])
-    
+
     print('Building ChampSim versions using args:')
     print('    Target:', args.target)
     print('    Cores :', args.cores)
     print('    Sets  :', args.sets)
-    
+    if args.target == 'hawkeye_split':
+        print('    Splits:', args.hawkeye_splits)
+        assert len(args.cores) == 1, 'Can build only one core count at a time when building hawkeye_split.'
+        assert args.cores[0] > 1, 'Can only build multi-core configurations of hawkeye_split.'
+        assert len(args.hawkeye_splits) % len(args.cores) == 0, 'Must provide a split set for each core.'
+
     if args.target not in ['all'] + replacement_names:
         print('Invalid build target')
         exit(-1)
@@ -189,48 +288,24 @@ def build_command():
     sets = set(args.sets)
 
     for name, fn in zip(replacement_names, replacement_fns):
-        if not (args.target == 'all' or name in args.target):
+        if (args.target == 'all' and name == 'hawkeye_split'): # Do not build hawkeye_split when building "all" replacement policies
             continue
-            
-        for c in cores:
+        if not (args.target == 'all' or name in args.target):  # Do not build a replacement policy if it's not specified (or all)
+            continue
+
+        if name == 'hawkeye_split':
+            c = cores[0]
+            it = [iter(args.hawkeye_splits)] * c
             for s in sets:
-                print(f'=== Building {name} ChampSim binary ({fn}), {c} core{"s" if c > 1 else ""}. {s} LLC sets ===')
+                for split in it:
+                    build_config_hawkeye_split(c, s, split)
 
-                # Backup original cache.h file
-                print('Backing up inc/cache.h...')
-                shutil.copyfile('./inc/cache.h', './inc/cache.h.bak')
+        else:
+            for c in cores:
+                for s in sets:
+                    build_config(fn, c, s)
 
-                # Backup original binary (if one clashes with ChampSim's output)
-                old_binary = default_binary.format(replacement_fn=fn, n_cores=c)
-                new_binary = old_binary + f'-{s}llc_sets'
-                if os.path.exists(old_binary):
-                    print(f'Backing up existing binary {old_binary}...')
-                    shutil.copyfile(old_binary, old_binary + '.bak')
 
-                # Change cache.h file to accomodate our desired number of sets
-                print(f'Changing LLC sets in inc/cache.h to NUM_CPUS*{s} (effectively {c} * {s}, {c*s*16 / 1024} KB)...')
-                change_llc_sets('./inc/cache.h', s)
-
-                # Build ChampSim with modified cache.h
-                os.system(f'./build_champsim.sh hashed_perceptron no no no no {fn} {c}')
-
-                # Restore original cache.h file.
-                print('Restoring inc/cache.h from backup...')
-                shutil.copyfile('./inc/cache.h.bak', './inc/cache.h')
-                os.remove('./inc/cache.h.bak')
-
-                # Rename new binary to reflect LLC sets.
-                print(f'Moving binary to {new_binary}...')
-                shutil.move(old_binary, new_binary)
-
-                # Restore original binary (if one eixsts)
-                if os.path.exists(old_binary + '.bak'):
-                    print(f'Restoring existing binary {old_binary}...')
-                    shutil.copyfile(old_binary + '.bak', old_binary)
-                    os.remove(old_binary + '.bak')
-
-                
-            
 """
 Run
 """
@@ -248,7 +323,7 @@ def run_command():
     parser.add_argument('-s', '--sets', type=int, default=2048)
     parser.add_argument('--results-dir', default=default_results_dir)
     parser.add_argument('--num-instructions', default=500) #None) #default_spec_instrs if execution_trace[0].isdigit() else default_gap_instrs)
-    parser.add_argument('--stat-printing-period', default=default_printing_period_instrs) 
+    parser.add_argument('--stat-printing-period', default=default_printing_period_instrs)
 
     args = parser.parse_args(sys.argv[2:])
     assert len(args.execution_traces) == args.cores, f'Provided {len(args.execution_traces)} traces for a {args.cores} core simulation.'
@@ -258,21 +333,21 @@ def run_command():
     results_dir = args.results_dir #os.path.join(args.results_dir, f'{args.sets}llc_sets')
     if not os.path.exists(results_dir):
         os.makedirs(results_dir, exist_ok=True)
-        
+
     # Generate names for this permutation. (trace names without extensions, joined by hyphen)
     base_traces = '-'.join(
         [''.join(os.path.basename(et).split('.')[:-2]) for et in execution_traces]
-    ) 
-       
+    )
+
     for name, fn in zip(replacement_names, replacement_fns):
         binary = default_binary_sets.format(replacement_fn = fn, n_cores = args.cores, n_sets = args.sets)
         base_binary = os.path.basename(binary)
-        
+
         # Check if we should actually run this baseline
         if name not in args.targets:
             print(f'Skipping {name} ({binary})')
             continue
-        
+
         if not os.path.exists(binary):
             print(f'{name} ChampSim binary not found, (looked for {binary})')
             exit(-1)
@@ -281,16 +356,16 @@ def run_command():
             binary=binary,
             period=args.stat_printing_period,
             sim=args.num_instructions,
-            trace=' '.join(execution_traces), 
-            results=results_dir, 
+            trace=' '.join(execution_traces),
+            results=results_dir,
             base_traces=base_traces,
             base_binary=base_binary
         )
 
         print('Running "' + cmd + '"')
         os.system(cmd)
-        
-        
+
+
 """
 Eval
 """
@@ -306,22 +381,22 @@ def get_traces_per_cpu(path):
                 traces[core] = os.path.basename(line.split()[-1])  # File name
                 #traces[core] = line.split()[-1] # Full path to file
     return traces
-    
-    
+
+
 def read_file(path, cache_level='LLC'):
     """Read a single ChampSim output file and parse the results.
     """
     #expected_keys = ('trace', 'ipc', 'total_miss', 'useful', 'useless', 'uac_correct', 'iss_prefetches', 'load_miss', 'rfo_miss', 'kilo_inst')
     expected_keys = ('trace', 'is_homogeneous', 'llc_sets', 'ipc', 'kilo_inst', 'load_miss', 'rfo_miss', 'total_miss')
-    
-    
+
+
     #data = defaultdict(lambda: defaultdict(int)) # Indexed by core -> feature
     data = defaultdict(dict)
-    
+
     # Build trace list
     data['trace'] = get_traces_per_cpu(path)
     data['is_homogeneous'] = len(set(data['trace'].values())) == 1
-    
+
     # Build other features
     with open(path, 'r') as f:
         for line in f:
@@ -333,7 +408,7 @@ def read_file(path, cache_level='LLC'):
                 core = int(line.split()[2])
                 data['ipc'][core] = float(line.split()[9])
                 data['kilo_inst'][core] = int(line.split()[4]) / 1000
-                
+
             # Region of interest statistics
             if 'CPU' in line and line.split()[0] == 'CPU':
                 core = int(line.split()[1])
@@ -351,7 +426,7 @@ def read_file(path, cache_level='LLC'):
             #     data['useless'][core] = int(line.split()[-4])
             #     data['uac_correct'][core] = int(line.split()[-1])
             #     data['iss_prefetches'][core] = int(line.split()[-8])
-    
+
     if not all(key in data for key in expected_keys):
         return None
 
@@ -366,18 +441,18 @@ def compute_stats(trace_path, baseline_name=''):
     data = read_file(trace_path)
     if not data:
         return pd.DataFrame({})
-    
+
     n_cores = max(data['ipc'].keys()) + 1
     out = defaultdict(list)
 
     for core in sorted(data['ipc'].keys()):
         trace, llc_sets, llc_sets_per_core, ipc, load_miss, rfo_miss, kilo_inst = (
-            data['trace'][core], data['llc_sets'], int(data['llc_sets'] / n_cores), data['ipc'][core], data['load_miss'][core], 
+            data['trace'][core], data['llc_sets'], int(data['llc_sets'] / n_cores), data['ipc'][core], data['load_miss'][core],
             data['rfo_miss'][core], data['kilo_inst'][core]
         )
         is_homogeneous = data['is_homogeneous']
         mpki = (load_miss + rfo_miss) / kilo_inst
-        
+
         out['Trace'].append(trace)
         out['Baseline'].append(baseline_name)
         out['CPU'].append(core)
@@ -401,14 +476,14 @@ def add_homo_norm_data(df, target):
     have been calcuated.
     """
     df = df.reset_index(drop=True)
-    
+
     # Get Homo Norm of Targets
     for i, core in df.iterrows():
         homo_run = df[
-            (df.Trace == core.Trace) & 
-            (df.Baseline == core.Baseline) & 
-            (df.NumCPUs == core.NumCPUs) & 
-            (df.LLCSetsPerCPU == core.LLCSetsPerCPU) & 
+            (df.Trace == core.Trace) &
+            (df.Baseline == core.Baseline) &
+            (df.NumCPUs == core.NumCPUs) &
+            (df.LLCSetsPerCPU == core.LLCSetsPerCPU) &
             (df.HomogeneousMix == True)
         ]
         df.loc[i, f'HomoNorm{target}'] = core[target] / homo_run[target].mean()
@@ -422,7 +497,7 @@ def add_homo_norm_data(df, target):
         df.loc[run.index, f'HomoNorm{target}Var'] = np.var(run[f'HomoNorm{target}'])
         df.loc[run.index, f'HomoNorm{target}Std'] = np.std(run[f'HomoNorm{target}'])
         df.loc[run.index, f'HomoNorm{target}MSE'] = ((run[f'HomoNorm{target}'] - 1)**2).mean() # Squared error
-        
+
         print('Run:', run_name)
         print(f'    HomoNorm{target}s:', run[f'HomoNorm{target}'].tolist())
         print('    Sum  :', df.loc[run.index, f'HomoNorm{target}Sum'].tolist()[0])
@@ -430,7 +505,7 @@ def add_homo_norm_data(df, target):
         print('    Var  :', df.loc[run.index, f'HomoNorm{target}Var'].tolist()[0])
         print('    Std  :', df.loc[run.index, f'HomoNorm{target}Std'].tolist()[0])
         print('    MSE  :', df.loc[run.index, f'HomoNorm{target}MSE'].tolist()[0])
-    
+
     return df
 
 
@@ -440,14 +515,14 @@ def add_single_norm_data(df, target):
     have been calcuated.
     """
     df = df.reset_index(drop=True)
-    
+
     # Get Single Norm of Target
     for i, core in df.iterrows():
         single_run = df[
-            (df.Trace == core.Trace) & 
-            (df.Baseline == core.Baseline) & 
-            (df.NumCPUs == 1) & 
-            (df.LLCSetsPerCPU == core.LLCSetsPerCPU) & 
+            (df.Trace == core.Trace) &
+            (df.Baseline == core.Baseline) &
+            (df.NumCPUs == 1) &
+            (df.LLCSetsPerCPU == core.LLCSetsPerCPU) &
             (df.HomogeneousMix == True)
         ]
         df.loc[i, f'SingleNorm{target}'] = core[target] / single_run[target].mean()
@@ -461,17 +536,17 @@ def add_single_norm_data(df, target):
         df.loc[run.index, f'SingleNorm{target}Var'] = np.var(run[f'SingleNorm{target}'])
         df.loc[run.index, f'SingleNorm{target}Std'] = np.std(run[f'SingleNorm{target}'])
         df.loc[run.index, f'SingleNorm{target}MSE'] = ((run[f'SingleNorm{target}'] - 1)**2).mean() # Squared error
-        
+
         print(f'    SingleNorm{target}s:', run[f'SingleNorm{target}'].tolist())
         print('    Sum  :', df.loc[run.index, f'SingleNorm{target}Sum'].tolist()[0])
         print('    HMean:', df.loc[run.index, f'SingleNorm{target}Hmean'].tolist()[0])
         print('    Var  :', df.loc[run.index, f'SingleNorm{target}Var'].tolist()[0])
         print('    Std  :', df.loc[run.index, f'SingleNorm{target}Std'].tolist()[0])
         print('    MSE  :', df.loc[run.index, f'SingleNorm{target}MSE'].tolist()[0])
-    
+
     return df
-            
-    
+
+
 
 def build_run_statistics(results_dir, output_file):
     """Build statistics for each run, per-core.
@@ -481,7 +556,7 @@ def build_run_statistics(results_dir, output_file):
         trace = fn.split('-hashed_perceptron-')[0]
         if trace not in traces:
             traces[trace] = {}
-            
+
         repl_fn = fn.split('-hashed_perceptron-')[1].split('-')[4]
         llc_sets = int(fn.split('-hashed_perceptron-')[1].split('-')[6].replace('llc_sets', '').replace('.txt', ''))
 
@@ -501,37 +576,37 @@ def build_run_statistics(results_dir, output_file):
     run_df = add_homo_norm_data(run_df, 'IPC')
     run_df = add_homo_norm_data(run_df, 'CPI')
     run_df = add_homo_norm_data(run_df, 'MPKI')
-    
+
     # Get the Single-normalized statistics for each run
     run_df = add_single_norm_data(run_df, 'IPC')
     run_df = add_single_norm_data(run_df, 'CPI')
     run_df = add_single_norm_data(run_df, 'MPKI')
-      
+
     run_df.to_csv(output_file, index=False)
-    
-    
-    
+
+
+
 def build_trace_statistics(run_stats_file):
     """Build statistics for each trace's fairness,
     using already-computed run statistics.
     """
-    columns = ['Trace', 'Baseline', 'NumCPUs', 
+    columns = ['Trace', 'Baseline', 'NumCPUs',
                'LLCSets', 'LLCSetsPerCPU',
                'MinIPC', 'MeanIPC', 'MaxIPC',
                'MinMPKI', 'MeanMPKI', 'MaxMPKI',
                'HomoNormMinIPC', 'HomoNormMeanIPC', 'HomoNormMaxIPC',
                'HomoNormMinMPKI', 'HomoNormMeanMPKI', 'HomoNormMaxMPKI']
-    
+
     trace_df = pd.DataFrame(columns=columns)
     run_df = pd.read_csv(run_stats_file)
-    
+
     # TODO - Clean up loop to do all three groups / uniques at once.
     t = run_df.groupby('Trace')
     for trace in run_df.Trace.unique():
-        
+
         b = t.get_group(trace).groupby('Baseline')
         for baseline in run_df.Baseline.unique():
-            
+
             s = b.get_group(baseline).groupby('LLCSetsPerCPU')
             for llc_sets in run_df.LLCSets.unique():
                 c = s.get_group(llc_sets).groupby('NumCPUs')
@@ -541,7 +616,7 @@ def build_trace_statistics(run_stats_file):
                         runs = c.get_group(n_cores)
                     except KeyError:
                         print(f'No runs match trace={trace}, llc_sets_per_cpu={llc_sets}, baseline={baseline}, n_cores={n_cores}')
-                        continue     
+                        continue
 
                     homo = runs[runs.HomogeneousMix == True]
                     homo_ipc = homo.IPC.mean() if not homo.empty else np.nan # Average homogeneous IPC (over the cores)
@@ -557,11 +632,11 @@ def build_trace_statistics(run_stats_file):
                         norm_ipcs.min(), norm_ipcs.mean(), norm_ipcs.max(),
                         norm_mpkis.min(), norm_mpkis.mean(), norm_mpkis.max(),
                     ]
-    
+
     trace_stats_file = run_stats_file.replace('.csv', '') + '_trace.csv'
     print(f'Saving dataframe to {trace_stats_file}...')
     trace_df.to_csv(trace_stats_file, index=False)
-            
+
 
 def eval_command():
     """Eval command
@@ -571,7 +646,7 @@ def eval_command():
     parser.add_argument('--output-file', default=default_output_file)
 
     args = parser.parse_args(sys.argv[2:])
-    
+
     print('=== Building run statistics... ===')
     build_run_statistics(args.results_dir, args.output_file)
 
@@ -580,7 +655,7 @@ def eval_command():
 
 
 
-    
+
 """
 Help
 """
@@ -596,7 +671,7 @@ def help_command():
         print(help_str['help'])
         exit(-1)
 
-    
+
 
 """
 Main
