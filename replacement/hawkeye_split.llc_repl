@@ -87,8 +87,11 @@ void CACHE::llc_initialize_replacement()
     }
     addr_history.clear();
    
-
-    cout << "Initialize Hawkeye state" << endl;
+    // Print split of predictor
+    cout << "Initialize Split Hawkeye state" << endl;
+    for (int k = 0; k < NUM_CPUS; k++) {
+        cout << "OPTgen core " << k << ": " << OPTGEN_PERCPU_WAYS[k] << " ways" << endl;
+    }
 }
 
 // find replacement victim
