@@ -24,15 +24,14 @@
 
 //3-bit RRIP counters or all lines
 #define maxRRPV 7
-uint32_t rrpv[LLC_SETS][LLC_WAYS];
-
+uint32_t rrpv[LLC_SETS][LLC_WAYS]; // RRPV of block
+uint32_t source_cpu[LLC_SETS][LLC_WAYS];  // CPU that inserted block
 
 uint64_t perset_mytimer[NUM_CPUS][LLC_SETS];
 
 // Signatures for sampled sets; we only use 64 of these
 // Budget = 64 sets * 16 ways * 12-bit signature per line = 1.5B
-// Allocate a signature set per core.
-uint64_t signatures[NUM_CPUS][LLC_SETS][LLC_WAYS];
+uint64_t signatures[LLC_SETS][LLC_WAYS];
 
 // Hawkeye Predictors for demand and prefetch requests
 // Predictor with 2K entries and 5-bit counter per entry
@@ -78,7 +77,8 @@ void CACHE::llc_initialize_replacement()
         for (int i=0; i<LLC_SETS; i++) {
             for (int j=0; j<LLC_WAYS; j++) {
                 rrpv[i][j] = maxRRPV;
-                signatures[k][i][j] = 0;
+                source_cpu[i][j] = 0;
+                signatures[i][j] = 0;
             }
 
             perset_mytimer[k][i] = 0;
@@ -121,7 +121,7 @@ uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
     assert (lru_victim != -1);
     //The predictor is trained negatively on LRU evictions
     if( SAMPLED_SET(set) )
-        demand_predictor[cpu]->decrement(signatures[cpu][set][lru_victim]);
+        demand_predictor[source_cpu[set][lru_victim]]->decrement(signatures[set][lru_victim]);
     return lru_victim;
 
     // WE SHOULD NOT REACH HERE
@@ -210,7 +210,8 @@ void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
 
     bool new_prediction = demand_predictor[cpu]->get_prediction (ip);
 
-    signatures[cpu][set][way] = ip;
+    signatures[set][way] = ip;
+    source_cpu[set][way] = cpu;
 
     //Set RRIP values and age cache-friendly line
     if(!new_prediction)
