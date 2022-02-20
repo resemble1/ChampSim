@@ -108,6 +108,10 @@ Options:
 
     -t / --targets <list-of-targets>
         List of targets to run. By default, it will run all targets: {replacement_names}.
+        
+    --hawkeye-split <hawkeye-split>
+        Split of ways between the <n_cores> OPTgens. If not provided, hawkeye_split
+        will be skipped.
 
     --results-dir <results-dir>
         Specifies what directory to save the ChampSim results file in. This
@@ -266,7 +270,7 @@ def build_command():
     parser.add_argument('target', default=None)
     parser.add_argument('-c', '--cores', type=int, nargs='+', default=[1])
     parser.add_argument('-s', '--sets', type=int, nargs='+', default=[2048])
-    parser.add_argument('--hawkeye_splits', type=int, nargs='+', default=None)
+    parser.add_argument('--hawkeye-splits', type=int, nargs='+', default=None)
     args = parser.parse_args(sys.argv[2:])
 
     print('Building ChampSim versions using args:')
@@ -320,6 +324,7 @@ def run_command():
     parser.add_argument('-t', '--targets', nargs='+', type=str, default=replacement_names)
     parser.add_argument('-c', '--cores', type=int, default=1)
     parser.add_argument('-s', '--sets', type=int, default=2048)
+    parser.add_argument('--hawkeye-split', nargs='+', type=int, default=None)
     parser.add_argument('--results-dir', default=default_results_dir)
     parser.add_argument('--num-instructions', default=500) #None) #default_spec_instrs if execution_trace[0].isdigit() else default_gap_instrs)
     parser.add_argument('--stat-printing-period', default=default_printing_period_instrs)
@@ -339,6 +344,19 @@ def run_command():
     )
 
     for name, fn in zip(replacement_names, replacement_fns):
+        
+        # Retool fn to fit defined Hawkeye split, if necessary.
+        if name == 'hawkeye_split': 
+            if args.hawkeye_split is None:
+                print(f'Skipping hawkeye_split, no split provided to argment <hawkeye-split>.')
+                continue
+  
+            assert args.cores > 1, 'Can only run hawkeye_split on multi-core configurations.'
+            assert len(args.hawkeye_split) == args.cores, 'Must provide a split set for each core.'
+        
+            fn = fn + '_' + '_'.join(str(i) for i in args.hawkeye_split)
+            
+
         binary = default_binary_sets.format(replacement_fn = fn, n_cores = args.cores, n_sets = args.sets)
         base_binary = os.path.basename(binary)
 
@@ -465,6 +483,11 @@ def compute_stats(trace_path, baseline_name=''):
         out['LoadMisses'].append(load_miss)
         out['RFOMisses'].append(rfo_miss)
         out['RunName'].append(os.path.basename(trace_path))
+        
+        if 'hawkeye_split' in baseline_name:
+            out['HawkeyeSplitAllocation'].append(baseline_name.split('_')[core + 2])
+        else:
+            out['HawkeyeSplitAllocation'].append(np.nan)
 
     return pd.DataFrame(out)
 
@@ -475,12 +498,15 @@ def add_homo_norm_data(df, target):
     have been calcuated.
     """
     df = df.reset_index(drop=True)
-
+    
     # Get Homo Norm of Targets
+    # NOTE: (Baseline of a hawkeye_split is a hawkeye_simple)
     for i, core in df.iterrows():
+        df_baseline = 'hawkeye_simple' if 'hawkeye_split' in core.Baseline else core.Baseline
+        #print('[DEBUG]', df_baseline, core.Baseline)
         homo_run = df[
             (df.Trace == core.Trace) &
-            (df.Baseline == core.Baseline) &
+            (df.Baseline == df_baseline) &
             (df.NumCPUs == core.NumCPUs) &
             (df.LLCSetsPerCPU == core.LLCSetsPerCPU) &
             (df.HomogeneousMix == True)
@@ -513,13 +539,16 @@ def add_single_norm_data(df, target):
     statistics for each core/run, after other stats
     have been calcuated.
     """
-    df = df.reset_index(drop=True)
-
+    df = df.reset_index(drop=True) 
+    
     # Get Single Norm of Target
+    # NOTE: (Baseline of a hawkeye_split is a hawkeye_simple)
     for i, core in df.iterrows():
+        df_baseline = 'hawkeye_simple' if 'hawkeye_split' in core.Baseline else core.Baseline
+        #print('[DEBUG]', df_baseline, core.Baseline)
         single_run = df[
             (df.Trace == core.Trace) &
-            (df.Baseline == core.Baseline) &
+            (df.Baseline == df_baseline) &
             (df.NumCPUs == 1) &
             (df.LLCSetsPerCPU == core.LLCSetsPerCPU) &
             (df.HomogeneousMix == True)
@@ -536,6 +565,7 @@ def add_single_norm_data(df, target):
         df.loc[run.index, f'SingleNorm{target}Std'] = np.std(run[f'SingleNorm{target}'])
         df.loc[run.index, f'SingleNorm{target}MSE'] = ((run[f'SingleNorm{target}'] - 1)**2).mean() # Squared error
 
+        print('Run:', run_name)
         print(f'    SingleNorm{target}s:', run[f'SingleNorm{target}'].tolist())
         print('    Sum  :', df.loc[run.index, f'SingleNorm{target}Sum'].tolist()[0])
         print('    HMean:', df.loc[run.index, f'SingleNorm{target}Hmean'].tolist()[0])
@@ -561,10 +591,11 @@ def build_run_statistics(results_dir, output_file):
 
         traces[trace][(repl_fn, llc_sets)] = os.path.join(results_dir, fn)
 
-    columns = ['Trace', 'Baseline', 'CPU', 'NumCPUs',
+    columns = ['Trace', 'Baseline', 'CPU', 'NumCPUs', 'HawkeyeSplitAllocation',
                'LLCSets', 'LLCSetsPerCPU',
                'HomogeneousMix', 'MPKI', 'IPC', 'CPI',
                'LoadMisses', 'RFOMisses', 'RunName']
+    
     run_df = pd.DataFrame(columns=columns)
     for trace in tqdm(traces, dynamic_ncols=True, unit='trace'):
         d = traces[trace]
@@ -602,13 +633,26 @@ def build_trace_statistics(run_stats_file):
     # TODO - Clean up loop to do all three groups / uniques at once.
     t = run_df.groupby('Trace')
     for trace in run_df.Trace.unique():
-
-        b = t.get_group(trace).groupby('Baseline')
+        try:
+            b = t.get_group(trace).groupby('Baseline')
+        except KeyError:
+            print(f'No runs match trace={trace}')
+            continue
+            
         for baseline in run_df.Baseline.unique():
-
-            s = b.get_group(baseline).groupby('LLCSetsPerCPU')
+            try:
+                s = b.get_group(baseline).groupby('LLCSetsPerCPU')
+            except KeyError:
+                print(f'No runs match trace={trace}, baseline={baseline}')
+                continue
+                
             for llc_sets in run_df.LLCSets.unique():
-                c = s.get_group(llc_sets).groupby('NumCPUs')
+                try:
+                    c = s.get_group(llc_sets).groupby('NumCPUs')
+                except KeyError:
+                    print(f'No runs match trace={trace}, llc_sets_per_cpu={llc_sets}, baseline={baseline}')
+                    continue
+                    
                 for n_cores in run_df.NumCPUs.unique():
 
                     try:
