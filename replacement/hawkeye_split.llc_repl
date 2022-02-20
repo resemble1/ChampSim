@@ -24,14 +24,11 @@
 
 //3-bit RRIP counters or all lines
 #define maxRRPV 7
-uint32_t rrpv[LLC_SETS][LLC_WAYS]; // RRPV of block
-uint32_t source_cpu[LLC_SETS][LLC_WAYS];  // CPU that inserted block
-
+uint32_t rrpv[LLC_SETS][LLC_WAYS];       // RRPV of block
+uint32_t source_cpu[LLC_SETS][LLC_WAYS]; // CPU that inserted block
+uint64_t signatures[LLC_SETS][LLC_WAYS]; // Signatures for sampled sets; we only use 64 of these
+                                         // - Budget = 64 sets * 16 ways * 12-bit signature per line = 1.5B
 uint64_t perset_mytimer[NUM_CPUS][LLC_SETS];
-
-// Signatures for sampled sets; we only use 64 of these
-// Budget = 64 sets * 16 ways * 12-bit signature per line = 1.5B
-uint64_t signatures[LLC_SETS][LLC_WAYS];
 
 // Hawkeye Predictors for demand and prefetch requests
 // Predictor with 2K entries and 5-bit counter per entry
@@ -39,16 +36,15 @@ uint64_t signatures[LLC_SETS][LLC_WAYS];
 #define MAX_SHCT 31
 #define SHCT_SIZE_BITS 11
 #define SHCT_SIZE (1<<SHCT_SIZE_BITS)
-#include "hawkeye_predictor.h"
 
-// Predictor
-// Allocate a separate Hawkeye Predictor per-core, using its associated OPTgen's outputs.
-HAWKEYE_PC_PREDICTOR* demand_predictor[NUM_CPUS]; 
+#include "hawkeye_predictor.h"
+HAWKEYE_PC_PREDICTOR* demand_predictor[NUM_CPUS]; // Predictor
+                                                  // Allocate a separate Hawkeye Predictor per-core, using its associated OPTgen's outputs.
 
 #include "optgen_simple.h"
-// per-set occupancy vectors; we only use 64 of these
-// Allocate a separate OPTgen per core, assuming a different share of the LLC (number of ways out of LLC_WAYS).
-OPTgen perset_optgen[NUM_CPUS][LLC_SETS]; 
+OPTgen perset_optgen[NUM_CPUS][LLC_SETS]; // per-set occupancy vectors; we only use 64 of these
+                                          // Allocate a separate OPTgen per core, assuming a different share of the LLC 
+                                          // as defined by OPTGEN_PERCPU_WAYS (number of ways out of LLC_WAYS).
 
 #include <math.h>
 #define bitmask(l) (((l) == 64) ? (unsigned long long)(-1LL) : ((1LL << (l))-1LL))

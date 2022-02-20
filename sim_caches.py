@@ -76,7 +76,7 @@ Options:
 
         Default: 2048 sets only.
 
-    --hawkeye_splits <hawkeye_split_list>
+    --hawkeye-splits <hawkeye_split_list>
         Specifies a list of way-splits to build Split Hawkeye variants. Only one core
         configuration can be built at a time. Pass in a list of <core-count> * <num_split>
         integers to build <num_split> versions of Split Hawkeye.
