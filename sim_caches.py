@@ -485,7 +485,7 @@ def compute_stats(trace_path, baseline_name=''):
         out['RunName'].append(os.path.basename(trace_path))
         
         if 'hawkeye_split' in baseline_name:
-            out['HawkeyeSplitAllocation'].append(baseline_name.split('_')[-(core + 1)])
+            out['HawkeyeSplitAllocation'].append(baseline_name.split('_')[-(n_cores - core)])
         else:
             out['HawkeyeSplitAllocation'].append(np.nan)
 
