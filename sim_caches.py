@@ -26,8 +26,8 @@ default_seed_file = './scripts/seeds.txt'
 # No prefetcher
 default_binary = 'bin/hashed_perceptron-no-no-no-no-{replacement_fn}-{n_cores}core'
 default_binary_sets = 'bin/hashed_perceptron-no-no-no-no-{replacement_fn}-{n_cores}core-{n_sets}llc_sets'
-replacement_names = ['lru', 'hawkeye', 'hawkeye_split']
-replacement_fns = ['lru', 'hawkeye_simple', 'hawkeye_split']
+replacement_names = ['lru', 'hawkeye', 'hawkeye_split', 'hawkeye_split_hard']
+replacement_fns = ['lru', 'hawkeye_simple', 'hawkeye_split', 'hawkeye_split_hard']
 
 # Example:
 #   64 bytes per line
@@ -56,10 +56,11 @@ Description:
     {prog} build <target>
         Builds <target> ChampSim binaries where <target> is one of:
 
-            all            Builds lru and regular Hawkeye binaries.
-            lru            Builds just the lru binary that uses a least-recently-used eviction policy
-            hawkeye        Builds just the Hawkeye binary that uses a standard Hawkeye eviction policy
-            hawkeye_split  Builds just the Hawkeye Split binary (need to pass splits to --hawkeye_splits)
+            all                Builds lru and regular Hawkeye binaries.
+            lru                Builds just the lru binary that uses a least-recently-used eviction policy
+            hawkeye            Builds just the Hawkeye binary that uses a standard Hawkeye eviction policy
+            hawkeye_split      Builds just the Hawkeye Split binary (need to pass splits to --hawkeye_splits)
+            hawkeye_split_hard Builds just the Hawkeye Split Hard binary (need to pass splits to --hawkeye_splits)
 
 Options:
     -c / --cores <core-count-list>
@@ -233,29 +234,28 @@ def build_config(replacement_fn, num_cpus, num_sets):
     restore_file(old_binary)                             # Restore original binary (if one exists)
 
 
-def build_config_hawkeye_split(num_cpus, num_sets, split):
-    print(f'=== Building hawkeye_split ChampSim binary, {num_cpus} core{"s" if num_cpus > 1 else ""}, {num_sets} LLC sets, split {split} ===')
+def build_config_hawkeye_split(num_cpus, num_sets, split, replacement_fn='hawkeye_split'): # or hawkeye_split_hard
+    print(f'=== Building {replacement_fn} ChampSim binary, {num_cpus} core{"s" if num_cpus > 1 else ""}, {num_sets} LLC sets, split {split} ===')
 
     assert len(split) == num_cpus, f'Need to provide {num_cpus} parameters for a split on {num_cpus} CPUs.'
-    replacement_fn = 'hawkeye_split'
     split_str = '_'.join([str(i) for i in split])
 
     # Backup files
     backup_file('./inc/cache.h')                         # Backup original cache.h file
-    backup_file('./replacement/hawkeye_split.llc_repl')  # Backup original hawkeye_split.llc_repl file
+    backup_file(f'./replacement/{replacement_fn}.llc_repl')  # Backup original hawkeye_split.llc_repl file
     old_binary = default_binary.format(replacement_fn=replacement_fn, n_cores=num_cpus)
-    new_binary = old_binary.replace('hawkeye_split', f'hawkeye_split_{split_str}') + f'-{num_sets}llc_sets'
+    new_binary = old_binary.replace(replacement_fn, f'{replacement_fn}_{split_str}') + f'-{num_sets}llc_sets'
     backup_file(old_binary)                              # Backup original binary (if one clashes with ChampSim's output)
 
     # Modify files and build
     change_llc_sets('./inc/cache.h', num_cpus, num_sets) # Change cache.h file to accomodate desired number of sets
-    change_hawkeye_splits('./replacement/hawkeye_split.llc_repl', split)
+    change_hawkeye_splits(f'./replacement/{replacement_fn}.llc_repl', split)
     build_binary(replacement_fn, num_cpus)               # Build ChampSim with modified cache.h
     move_file(old_binary, new_binary)                    # Rename new binary to reflect changes.
 
     # Restore backups
     restore_file('./inc/cache.h')                        # Restore original cache.h file.
-    restore_file('./replacement/hawkeye_split.llc_repl') # Restore original hawkeye_split.llc_repl file.
+    restore_file(f'./replacement/{replacement_fn}.llc_repl') # Restore original hawkeye_split.llc_repl file.
     restore_file(old_binary)                             # Restore original binary (if one exists)
 
 
@@ -292,16 +292,16 @@ def build_command():
     sets = set(args.sets)
 
     for name, fn in zip(replacement_names, replacement_fns):
-        if (args.target == 'all' and name == 'hawkeye_split'): # Do not build hawkeye_split when building "all" replacement policies
+        if (args.target == 'all' and 'hawkeye_split' in name): # Do not build hawkeye_split or hawkeye_split_hard when building "all" replacement policies
             continue
         if not (args.target == 'all' or name == args.target):  # Do not build a replacement policy if it's not specified (or all)
             continue
 
-        if name == 'hawkeye_split':
+        if 'hawkeye_split' in name:
             c = list(cores)[0]
             for s in sets:
                 for split in zip(*[iter(args.hawkeye_splits)]*c):
-                    build_config_hawkeye_split(c, s, split)
+                    build_config_hawkeye_split(c, s, split, replacement_fn=name)
 
         else:
             for c in cores:
@@ -346,7 +346,7 @@ def run_command():
     for name, fn in zip(replacement_names, replacement_fns):
         
         # Retool fn to fit defined Hawkeye split, if necessary.
-        if name == 'hawkeye_split': 
+        if 'hawkeye_split' in name: 
             if args.hawkeye_split is None:
                 print(f'Skipping hawkeye_split, no split provided to argment <hawkeye-split>.')
                 continue
@@ -485,7 +485,7 @@ def compute_stats(trace_path, baseline_name=''):
         out['RunName'].append(os.path.basename(trace_path))
         
         if 'hawkeye_split' in baseline_name:
-            out['HawkeyeSplitAllocation'].append(baseline_name.split('_')[core + 2])
+            out['HawkeyeSplitAllocation'].append(baseline_name.split('_')[-(core + 1)])
         else:
             out['HawkeyeSplitAllocation'].append(np.nan)
 
