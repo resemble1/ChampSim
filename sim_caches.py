@@ -285,7 +285,7 @@ def build_command():
         assert len(args.hawkeye_splits) % len(args.cores) == 0, 'Must provide a split set for each core.'
 
     if args.target not in ['all'] + replacement_names:
-        print('Invalid build target')
+        print('Invalid build target', args.target)
         exit(-1)
 
     # Build ChampSims with different replacement policies.
