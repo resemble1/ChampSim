@@ -26,8 +26,8 @@ default_seed_file = './scripts/seeds.txt'
 # No prefetcher
 default_binary = 'bin/hashed_perceptron-no-no-no-no-{replacement_fn}-{n_cores}core'
 default_binary_sets = 'bin/hashed_perceptron-no-no-no-no-{replacement_fn}-{n_cores}core-{n_sets}llc_sets'
-replacement_names = ['lru', 'hawkeye', 'hawkeye_split', 'hawkeye_split_hard']
-replacement_fns = ['lru', 'hawkeye_simple', 'hawkeye_split', 'hawkeye_split_hard']
+replacement_names = ['lru', 'ucp', 'hawkeye', 'hawkeye_split', 'hawkeye_split_hard']
+replacement_fns = ['lru', 'ucp', 'hawkeye_simple', 'hawkeye_split', 'hawkeye_split_hard']
 
 # Example:
 #   64 bytes per line
@@ -56,8 +56,9 @@ Description:
     {prog} build <target>
         Builds <target> ChampSim binaries where <target> is one of:
 
-            all                Builds lru and regular Hawkeye binaries.
+            all                Builds lru, ucpl and regular Hawkeye binaries.
             lru                Builds just the lru binary that uses a least-recently-used eviction policy
+            ucp                Builds just the ucp binary that uses Utility-based Cache Partitioning + LRU eviction
             hawkeye            Builds just the Hawkeye binary that uses a standard Hawkeye eviction policy
             hawkeye_split      Builds just the Hawkeye Split binary (need to pass splits to --hawkeye_splits)
             hawkeye_split_hard Builds just the Hawkeye Split Hard binary (need to pass splits to --hawkeye_splits)

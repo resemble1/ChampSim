@@ -1,0 +1,283 @@
+// UCP with UMON-DSS implementation (+ LRU replacement)
+// Quershi and Patt, MICRO '06
+//
+// Author: Carson Molder
+
+#include "cache.h"
+
+// DSS: Sample 32 sets per core
+#include <math.h>
+
+
+
+#define PARTITION_PERIOD 5000000 // Reallocate ways once every <PARTITION_PERIOD> cycles.
+#define DSS_SETS 32              // One out of every <DSS_SETS> sets is used for UMON monitoring.
+#define SAMPLING                 // Whether to use dynamic set sampling (UMON-DSS). If not defined, UMON-Global is used.
+
+#ifdef SAMPLING
+    #define SAMPLED_SET(set) (set % DSS_SETS == 0)
+#else
+    #define SAMPLED_SET(set) (true)
+#endif
+
+uint32_t way_allocation[NUM_CPUS];               // Per-CPU way allocation
+uint32_t source_cpu[LLC_SET][LLC_WAY];           // CPU that inserted block
+uint32_t umon[NUM_CPUS][LLC_WAY];                // UMON per-position hit counters. (only over (LLC_SET / DSS_SETS) sets)
+uint32_t shadow_lru[NUM_CPUS][LLC_SET][LLC_WAY]; // LRU positions *if* the CPU had all ways. 
+                                                 // (only use (LLC_SET / DSS_SETS) sets)
+
+uint64_t next_partition_cycle = PARTITION_PERIOD;
+
+uint32_t utility(uint32_t cpu, uint32_t a_ways, uint32_t b_ways) {
+    assert(a_ways < b_ways);
+    assert(a_ways >= 0 && a_ways <= LLC_WAY - 2);
+    assert(b_ways >= 1 && b_ways <= LLC_WAY - 1);
+
+    uint32_t miss_count = 0;
+    uint32_t misses_a;
+    uint32_t misses_b;
+
+    for(int i = LLC_WAY - 1; i >= 0; i--) {
+        if ((i + 1) == b_ways)
+            misses_b = miss_count;
+        if ((i + 1) == a_ways)
+            misses_a = miss_count;
+        miss_count += umon[cpu][i]; // Add the hits we would have missed if the CPU did not have this way.
+    }
+    if (a_ways == 0)
+        misses_a = miss_count; // If we have no ways allocated, then we get *all* the additional misses.
+
+    return misses_a - misses_b;
+}
+
+uint32_t marginal_utility(uint32_t cpu, uint32_t a_ways, uint32_t b_ways) {
+    return utility(cpu, a_ways, b_ways) / (b_ways - a_ways);
+}
+
+uint32_t maximum_marginal_utility(uint32_t cpu, uint32_t allocation, uint32_t balance, uint32_t &max_mu_ways) {
+    uint32_t max_mu = 0;
+    max_mu_ways = 0;
+    for(int i = 0; i <= balance; i++) {
+        uint32_t mu = marginal_utility(cpu, allocation, allocation + i);
+        if (mu > max_mu) {
+            max_mu = mu;
+            max_mu_ways = allocation + i;
+        }
+    }
+    return max_mu;
+}
+
+void reset_way_partition() {
+    for (int i = 0; i < NUM_CPUS; i++) {
+        way_allocation[i] = 0;
+    }
+}
+
+void reset_umon_counters() {
+    for (int i = 0; i < NUM_CPUS; i++) {
+        for (int j = 0; j < LLC_WAY; j++) {
+            umon[i][j] = 0;
+        }
+    }
+}
+
+/* At the end of a partitioning period, halve the 
+UMON hit counters in each core's UMON */
+void halve_umon_counters() {
+    for (int i = 0; i < NUM_CPUS; i++) {
+        for (int j = 0; j < LLC_WAY; j++) {
+            umon[i][j] /= 2;
+        }
+    }
+}
+
+/* Use the Lookahead Algorithm (Alg. 2) to update the way allocation */
+void update_way_allocation() {
+    uint32_t balance = LLC_WAY; // Balance of ways to give
+    reset_way_partition(); // Reset way allocation to all zeros
+
+    uint32_t max_mus[NUM_CPUS];
+    uint32_t ways_required[NUM_CPUS];
+
+    while(balance > 0) {
+        // Determine maximum marginal utility + ways needed for each CPU.
+        for(uint32_t cpu = 0; cpu < NUM_CPUS; cpu++) {
+            uint32_t alloc = way_allocation[cpu];
+            uint32_t max_mu_ways = 0; // Pass by reference to maximum_marginal_utility
+            max_mus[cpu] = maximum_marginal_utility(cpu, alloc, balance, max_mu_ways);
+            ways_required[cpu] = max_mu_ways; // TODO
+        }
+
+        // Determine winner CPU (Application with the largest max. marginal utility)
+        uint32_t winner = 0;
+        uint32_t max_max_mu = max_mus[0];
+        for(uint32_t cpu = 0; cpu < NUM_CPUS; cpu++) {
+            if (max_mus[cpu] > max_max_mu) {
+                winner = cpu;
+                max_max_mu = max_mus[cpu];
+            }
+        }
+
+        // Allocate the blocks to the winner
+        way_allocation[winner] += ways_required[winner];
+        balance -= ways_required[winner];
+    }
+
+    cout << "Updated UCP way partition:" << endl;
+    for (int i = 0; i < NUM_CPUS; i++) {
+        cout << "CPU " << i << ": " << way_allocation[i] << " ways - ";
+    }
+    cout << endl;
+}
+
+// initialize replacement state
+void CACHE::llc_initialize_replacement()
+{
+    // Set up UMON counters
+    reset_umon_counters();
+
+    // Start with equal partitioning
+    for(int i = 0; i < NUM_CPUS; i++){
+        way_allocation[i] = LLC_WAY / NUM_CPUS;
+    }
+
+    // Set up shadow LRU tag directory
+    for(int i = 0; i < NUM_CPUS; i++){
+        for(int j = 0; j < LLC_SET; j++) {
+            for(int k = 0; k < LLC_WAY; k++) {
+                shadow_lru[i][j][k] = 0;
+            }
+        }
+    }
+}
+
+// find replacement victim
+uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type)
+{
+    // Based on "lru_victim" in base_replacement.cc, with hard partiioning
+    uint32_t way = 0;
+
+    // Fill invalid line first
+    for(way = 0; way < LLC_WAY; way++) {
+        if (block[set][way].valid == false) {
+            return way;
+        }
+    }
+
+    // Count the number of blocks in the set inserted by the source CPU.
+    // If it is >= the way allocation, select a source CPU-inserted block as the victim.
+    // Otherwise, select a non-source CPU-inserted block as the victim.
+    uint32_t source_inserted_blocks = 0;
+    for(uint32_t i = 0; i < LLC_WAY; i++) {
+        if (source_cpu[set][way] == cpu)
+            source_inserted_blocks++;
+    }
+
+    // If it is >= the way allocation:
+    // - Evict the LRU block from only those the source CPU inserted.
+    uint32_t oldest_way = LLC_WAY;
+    uint32_t oldest_lru = 0;
+    if (source_inserted_blocks >= way_allocation[cpu]) {
+        for(way = 0; way < LLC_WAY; way++) {
+            if((source_cpu[set][way] == cpu) && (block[set][way].lru > oldest_lru)) {
+                oldest_way = way;
+                oldest_lru = block[set][way].lru;
+            }   
+        }
+    // If it is < the way allocation
+    // - Evict the LRU block from only those other CPUs inserted.
+    } else {
+        for(way = 0; way < LLC_WAY; way++) {
+            if((source_cpu[set][way] != cpu) && (block[set][way].lru >= oldest_lru)) {
+                oldest_way = way;
+                oldest_lru = block[set][way].lru;
+            }
+        }
+    }
+
+    if (oldest_way == LLC_WAY) {
+        cerr << "[" << NAME << "] " << __func__ << " no victim! set: " << set << endl;
+        assert(0);
+    }
+
+    return oldest_way;
+}
+
+
+
+
+// called on every cache hit and cache fill
+void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit)
+{
+    string TYPE_NAME;
+    if (type == LOAD)
+        TYPE_NAME = "LOAD";
+    else if (type == RFO)
+        TYPE_NAME = "RFO";
+    else if (type == PREFETCH)
+        TYPE_NAME = "PF";
+    else if (type == WRITEBACK)
+        TYPE_NAME = "WB";
+    else
+        assert(0);
+
+    if (hit)
+        TYPE_NAME += "_HIT";
+    else
+        TYPE_NAME += "_MISS";
+
+    if ((type == WRITEBACK) && ip)
+        assert(0);
+
+    // If the partitioning period is over, repartiton the cache.
+    // Check CPU 0's cycle count.
+    if (current_core_cycle[0] >= next_partition_cycle) {
+        update_way_allocation();
+        halve_umon_counters();
+        next_partition_cycle += PARTITION_PERIOD;
+    }
+
+    if (hit && (type == WRITEBACK)) // writeback hit does not update LRU state
+        return;
+
+    // For this core's UMON, increment the hit recency counter 
+    // of the LRU position that the line would be at if the CPU 
+    // had all ways.
+    if(hit && SAMPLED_SET(set)) {
+        uint32_t hit_recency_position = shadow_lru[cpu][set][way];
+        assert(hit_recency_position < LLC_WAY);
+        umon[cpu][hit_recency_position]++;
+    }
+
+    // Update LRU replacement state within the hard partition.
+    for (uint32_t i = 0; i < LLC_WAY; i++) {
+        if ((source_cpu[set][i] == source_cpu[set][way]) && (block[set][i].lru < block[set][way].lru)) { 
+            block[set][i].lru++; // Demote younger lines towards LRU position
+        }
+    }
+    block[set][way].lru = 0; // Promote this line to MRU position
+
+    // Update shadow LRU replacement state, which assumes we had all ways.
+    if (SAMPLED_SET(set)) {
+        for (uint32_t i = 0; i < LLC_WAY; i++) {
+            if (shadow_lru[cpu][set][i] < shadow_lru[cpu][set][way]) {
+                shadow_lru[cpu][set][i]++; // Demote younger lines towards LRU position
+            }
+        }
+        shadow_lru[cpu][set][way] = 0; // Promote to MRU position in shadow LRU.
+    }
+
+    // If this is an insertion, update the source CPU of the block.
+    if (!hit)
+        source_cpu[set][way] = cpu; // Mark CPU that inserted line
+    
+}
+
+void CACHE::llc_replacement_final_stats()
+{
+    cout << "UCP partition at end of simulation:" << endl;
+    for (int i = 0; i < NUM_CPUS; i++) {
+        cout << "CPU " << i << ": " << way_allocation[i] << " ways - ";
+    }
+    cout << endl;
+}
