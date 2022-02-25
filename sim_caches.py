@@ -9,12 +9,15 @@ import argparse
 import os
 import sys
 import shutil
+import itertools
 from collections import defaultdict
 
 import pandas as pd
 import numpy as np
 from scipy import stats
 from tqdm import tqdm
+
+LLC_WAYS = 16
 
 default_results_dir = './results'
 default_output_file = './stats.csv'
@@ -81,14 +84,15 @@ Options:
     --hawkeye-splits <hawkeye_split_list>
         Specifies a list of way-splits to build Split Hawkeye variants. Only one core
         configuration can be built at a time. Pass in a list of <core-count> * <num_split>
-        integers to build <num_split> versions of Split Hawkeye.
+        integers to build <num_split> versions of Split Hawkeye. If no list is provided,
+        performs an exhaustive search of full splits across {llc_ways} ways.
 
         Example: 3-13 split, 8-8 split on 2-core ChampSim: 3 13 8 8
         Default: 1 / <core-count> for all core counts
 
 Notes:
     Barring updates to the GitHub repository, this will only need to be done once.
-'''.format(prog=sys.argv[0]),
+'''.format(prog=sys.argv[0], llc_ways=LLC_WAYS),
 
 'run': '''usage: {prog} run <execution-traces> [-c / --cores <num-cores>] [--results-dir <results-dir>]
                             [--num-instructions <num-instructions>] [--stat-printing-period <num-instructions>]
@@ -191,6 +195,26 @@ def change_hawkeye_splits(hawkeye_split_path, split):
 
     with open(hawkeye_split_path, 'wt') as f:
         print(replacement, file=f)
+        
+        
+def exhaustive_hawkeye_splits(num_cpus):
+    all_splits = [] # List of tuples
+    for comb in itertools.combinations_with_replacement(range(2, LLC_WAYS), num_cpus):
+        if sum(comb) != LLC_WAYS:
+            continue
+            
+        for perm in itertools.permutations(comb, num_cpus):
+            all_splits.append(perm)
+    
+    all_splits = list(dict.fromkeys(all_splits)) # Remove duplicates
+    all_splits = sorted(all_splits) # Sort by first CPU, second CPU, ...
+    
+    all_splits_list = [] # Convert to a list of raw integers, the code will undo this operation later.
+    for tup in all_splits:
+        for elem in tup:
+            all_splits_list.append(elem)
+    
+    return all_splits_list
 
 
 def build_binary(replacement_fn, num_cpus):
@@ -271,7 +295,7 @@ def build_command():
     parser.add_argument('target', default=None)
     parser.add_argument('-c', '--cores', type=int, nargs='+', default=[1])
     parser.add_argument('-s', '--sets', type=int, nargs='+', default=[2048])
-    parser.add_argument('--hawkeye-splits', type=int, nargs='+', default=None)
+    parser.add_argument('--hawkeye-splits', type=int, nargs='+', default=[]) # default: exhaustive splits over LLC_WAYS. (this can get BIG!)
     args = parser.parse_args(sys.argv[2:])
 
     print('Building ChampSim versions using args:')
@@ -279,10 +303,19 @@ def build_command():
     print('    Cores :', args.cores)
     print('    Sets  :', args.sets)
     if args.target == 'hawkeye_split':
-        print('    Splits:', args.hawkeye_splits)
         assert len(args.cores) == 1, 'Can build only one core count at a time when building hawkeye_split.'
         assert args.cores[0] > 1, 'Can only build multi-core configurations of hawkeye_split.'
-        assert len(args.hawkeye_splits) % len(args.cores) == 0, 'Must provide a split set for each core.'
+        
+        if len(args.hawkeye_splits) == 0:
+            hawkeye_splits = exhaustive_hawkeye_splits(args.cores[0])
+            ans = input(f'Will build {len(hawkeye_splits) // args.cores[0]} binaries. Continue? (y/n) -> ')
+            if (ans.lower() != 'y'):
+                exit(0)
+        else:
+            hawkeye_splits = args.hawkeye_splits
+        
+        print('    Splits:', hawkeye_splits)
+        assert len(hawkeye_splits) % len(args.cores) == 0, 'Must provide a split set for each core.'
 
     if args.target not in ['all'] + replacement_names:
         print('Invalid build target', args.target)
@@ -301,7 +334,7 @@ def build_command():
         if 'hawkeye_split' in name:
             c = list(cores)[0]
             for s in sets:
-                for split in zip(*[iter(args.hawkeye_splits)]*c):
+                for split in zip(*[iter(hawkeye_splits)]*c):
                     build_config_hawkeye_split(c, s, split, replacement_fn=name)
 
         else:
