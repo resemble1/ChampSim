@@ -28,17 +28,17 @@ uint32_t shadow_lru[NUM_CPUS][LLC_SET][LLC_WAY]; // LRU positions *if* the CPU h
 
 uint64_t next_partition_cycle = PARTITION_PERIOD;
 
-uint32_t utility(uint32_t cpu, uint32_t a_ways, uint32_t b_ways) {
-    cout << "[DEBUG] a_ways: " << a_ways << " b_ways: " << b_ways << endl;
-    //assert(a_ways < b_ways);
-    //assert(a_ways >= 0 && a_ways < LLC_WAY); // FIXME these asserts are failing even when correct
-    //assert(b_ways >= 0 && b_ways < LLC_WAY);
+int utility(int cpu, int a_ways, int b_ways) {
+    cout << "[DEBUG] Insudie utility: a_ways=" << a_ways << " b_ways=" << b_ways << endl;
+    assert(a_ways < b_ways);
+    assert(a_ways >= 0 && a_ways < LLC_WAY); // FIXME these asserts are failing even when correct
+    assert(b_ways >= 0 && b_ways < LLC_WAY);
 
-    uint32_t miss_count = 0;
-    uint32_t misses_a = 0;
-    uint32_t misses_b = 0;
+    int miss_count = 0;
+    int misses_a = 0;
+    int misses_b = 0;
 
-    for(uint32_t i = LLC_WAY - 1; i >= 0; i--) {
+    for(int i = LLC_WAY - 1; i >= 0; i--) {
         if ((i + 1) == a_ways)
             misses_a = miss_count;
         if ((i + 1) == b_ways)
@@ -51,16 +51,17 @@ uint32_t utility(uint32_t cpu, uint32_t a_ways, uint32_t b_ways) {
     return misses_a - misses_b;
 }
 
-uint32_t marginal_utility(uint32_t cpu, uint32_t a_ways, uint32_t b_ways) {
+int marginal_utility(int cpu, int a_ways, int b_ways) {
+    cout << "[DEBUG] Inside marginal_utility, cpu=" << cpu << " a_ways=" << a_ways << " b_ways=" << b_ways << endl;
     return utility(cpu, a_ways, b_ways) / (b_ways - a_ways);
 }
 
-uint32_t maximum_marginal_utility(uint32_t cpu, uint32_t allocation, uint32_t balance, uint32_t &max_mu_ways) {
-    uint32_t max_mu = 0;
+int maximum_marginal_utility(int cpu, int allocation, int balance, int &max_mu_ways) {
+    cout << "[DEBUG] Inside maximum_marginal_utility: cpu=" << cpu << " allocation=" << allocation << " balance=" << balance << " max_mu_ways=" << max_mu_ways << endl;
+    int max_mu = 0;
     max_mu_ways = 0;
-    for(uint32_t i = 1; i <= balance; i++) {
-        cout << "[DEBUG] calling marginal_utility, a_ways: " << allocation << " b_ways:" << (allocation + i) << endl;
-        uint32_t mu = marginal_utility(cpu, allocation, allocation + i);
+    for(int i = 1; i <= balance; i++) {
+        int mu = marginal_utility(cpu, allocation, allocation + i);
         if (mu > max_mu) {
             max_mu = mu;
             max_mu_ways = allocation + i;
@@ -69,7 +70,7 @@ uint32_t maximum_marginal_utility(uint32_t cpu, uint32_t allocation, uint32_t ba
     return max_mu;
 }
 
-void reset_way_partition() {
+void reset_way_allocation() {
     for (int i = 0; i < NUM_CPUS; i++) {
         way_allocation[i] = 0;
     }
@@ -95,25 +96,26 @@ void halve_umon_counters() {
 
 /* Use the Lookahead Algorithm (Alg. 2) to update the way allocation */
 void update_way_allocation() {
-    uint32_t balance = LLC_WAY; // Balance of ways to give
-    reset_way_partition(); // Reset way allocation to all zeros
+    int balance = LLC_WAY; // Balance of ways to give
+    reset_way_allocation(); // Reset way allocation to all zeros
 
-    uint32_t max_mus[NUM_CPUS];
-    uint32_t ways_required[NUM_CPUS];
+    int max_mus[NUM_CPUS];
+    int ways_required[NUM_CPUS];
 
     while(balance > 0) {
         // Determine maximum marginal utility + ways needed for each CPU.
-        for(uint32_t cpu = 0; cpu < NUM_CPUS; cpu++) {
-            uint32_t alloc = way_allocation[cpu];
-            uint32_t max_mu_ways = 0; // Pass by reference to maximum_marginal_utility
+        for(int cpu = 0; cpu < NUM_CPUS; cpu++) {
+            int alloc = way_allocation[cpu];
+            int max_mu_ways = 0; // Pass by reference to maximum_marginal_utility
+            //cout << "[DEBUG] Calling maximum_marginal_utility: cpu=" << cpu << " alloc=" << alloc << " balance=" << balance << " max_mu_ways=" << max_mu_ways << endl;
             max_mus[cpu] = maximum_marginal_utility(cpu, alloc, balance, max_mu_ways);
             ways_required[cpu] = max_mu_ways;
         }
 
         // Determine winner CPU (Application with the largest max. marginal utility)
-        uint32_t winner = 0;
-        uint32_t max_max_mu = max_mus[0];
-        for(uint32_t cpu = 0; cpu < NUM_CPUS; cpu++) {
+        int winner = 0;
+        int max_max_mu = max_mus[0];
+        for(int cpu = 0; cpu < NUM_CPUS; cpu++) {
             if (max_mus[cpu] > max_max_mu) {
                 winner = cpu;
                 max_max_mu = max_mus[cpu];
