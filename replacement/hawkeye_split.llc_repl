@@ -77,7 +77,11 @@ void CACHE::llc_initialize_replacement()
             }
 
             perset_mytimer[k][i] = 0;
-            perset_optgen[k][i].init(OPTGEN_PERCPU_WAYS[k] - 1);
+
+            if (k == NUM_CPUS - 1)
+                perset_optgen[k][i].init(OPTGEN_PERCPU_WAYS[k] - 1); // Leave one way for OPT-predicted misses (taken from last core)
+            else
+                perset_optgen[k][i].init(OPTGEN_PERCPU_WAYS[k]);
         }
 
         demand_predictor[k] = new HAWKEYE_PC_PREDICTOR();
