@@ -136,7 +136,7 @@ Options:
     default_printing_period_instrs=default_printing_period_instrs,
     seed_file=default_seed_file),
 
-'eval': '''usage: {prog} eval [--results-dir <results-dir>] [--output-file <output-file>]
+'eval': '''usage: {prog} eval <results-dir> [--output-file <output-file>]
 
 Description:
     {prog} eval
@@ -145,12 +145,17 @@ Description:
 
 Options:
     --results-dir <results-dir>
-        Specifies what directory the ChampSim results files are in. This defaults
-        to `{default_results_dir}`.
+        Specifies what directory the ChampSim results files are in.
 
     --output-file <output-file>
         Specifies what file path to save the stats CSV data to. This defaults to
         `{default_output_file}`.
+        
+    --norm-baseline <baseline>
+        If specified, results on ALL baselines will be normalized to this specific
+        baseline, for both homogeneous-mix and single-core norms. If not specified,
+        the normalization will be to the closest-related baseline (specified in
+        the NormBaseline column).
 
 Note:
     To get stats comparing performance to a no-prefetcher baseline, it is necessary
@@ -158,7 +163,7 @@ Note:
 
     Without the base data, relative performance data comparing MPKI and IPC will
     not be available and the coverage statistic will only be approximate.
-'''.format(prog=sys.argv[0], default_results_dir=default_results_dir, default_output_file=default_output_file),
+'''.format(prog=sys.argv[0], default_output_file=default_output_file),
 }
 
 
@@ -302,7 +307,7 @@ def build_command():
     print('    Target:', args.target)
     print('    Cores :', args.cores)
     print('    Sets  :', args.sets)
-    if args.target == 'hawkeye_split':
+    if args.target.startswith('hawkeye_split'):
         assert len(args.cores) == 1, 'Can build only one core count at a time when building hawkeye_split.'
         assert args.cores[0] > 1, 'Can only build multi-core configurations of hawkeye_split.'
         
@@ -512,6 +517,7 @@ def compute_stats(trace_path, baseline_name=''):
         out['LLCSets'].append(llc_sets)
         out['LLCSetsPerCPU'].append(llc_sets_per_core)
         out['MPKI'].append(mpki)
+        out['NumInstMillions'].append(kilo_inst * 1000)
         out['IPC'].append(ipc)
         out['CPI'].append(1 / ipc)
         out['LoadMisses'].append(load_miss)
@@ -526,7 +532,20 @@ def compute_stats(trace_path, baseline_name=''):
     return pd.DataFrame(out)
 
 
-def add_homo_norm_data(df, target):
+
+
+def default_norm_baseline(baseline, norm='Homo'):
+    #print('[DEBUG] default_norm_baseline:', baseline)
+    if baseline.startswith('hawkeye'):
+        return 'hawkeye_simple'
+    if baseline == 'ucp':
+        return 'lru' #if norm == 'Single' else 'ucp'
+    
+    return baseline # lru
+
+
+
+def add_homo_norm_data(df, target, norm_baseline=None):
     """Compute the homogeneous-mix run normalized
     statistics for each core/run, after other stats
     have been calcuated.
@@ -536,39 +555,60 @@ def add_homo_norm_data(df, target):
     # Get Homo Norm of Targets
     # NOTE: (Baseline of a hawkeye_split is a hawkeye_simple)
     for i, core in df.iterrows():
-        df_baseline = 'hawkeye_simple' if 'hawkeye_split' in core.Baseline else core.Baseline
-        #print('[DEBUG]', df_baseline, core.Baseline)
+        
+        if norm_baseline == None:
+            core_norm_baseline = default_norm_baseline(core.Baseline, norm='Homo')
+        else:
+            core_norm_baseline = norm_baseline
+
         homo_run = df[
             (df.Trace == core.Trace) &
-            (df.Baseline == df_baseline) &
+            (df.Baseline == core_norm_baseline) &
             (df.NumCPUs == core.NumCPUs) &
             (df.LLCSetsPerCPU == core.LLCSetsPerCPU) &
             (df.HomogeneousMix == True)
         ]
+        
+        # For calculating FairUtility constraint on this particular core,
+        # without introducing bias w.r.t a different normalization baseline.
+        homo_run_default_norm = df[
+            (df.Trace == core.Trace) &
+            (df.Baseline == default_norm_baseline(core.Baseline, norm='Homo')) &
+            (df.NumCPUs == core.NumCPUs) &
+            (df.LLCSetsPerCPU == core.LLCSetsPerCPU) &
+            (df.HomogeneousMix == True)
+        ]
+        
+        df.loc[i, 'HomoNormBaseline'] = core_norm_baseline
+        df.loc[i, 'HomoDefaultBaseline'] = default_norm_baseline(core.Baseline, norm='Homo')
         df.loc[i, f'HomoNorm{target}'] = core[target] / homo_run[target].mean()
+        df.loc[i, f'HomoNorm{target}VsDefaultBaseline'] = core[target] / homo_run_default_norm[target].mean()
 
     # Get Homo Norm Target statistics for each run
     runs = df.groupby('RunName')
     for run_name in df.RunName.unique():
         run = runs.get_group(run_name)
+        
+        print('Run:', run_name)
         df.loc[run.index, f'HomoNorm{target}Sum'] = np.sum(run[f'HomoNorm{target}'])
-        df.loc[run.index, f'HomoNorm{target}Hmean'] = stats.hmean(run[f'HomoNorm{target}'])
+        df.loc[run.index, f'HomoNorm{target}Hmean'] = stats.hmean(run[f'HomoNorm{target}']) if not run[f'HomoNorm{target}'].isnull().all() else np.nan
         df.loc[run.index, f'HomoNorm{target}Var'] = np.var(run[f'HomoNorm{target}'])
         df.loc[run.index, f'HomoNorm{target}Std'] = np.std(run[f'HomoNorm{target}'])
         df.loc[run.index, f'HomoNorm{target}MSE'] = ((run[f'HomoNorm{target}'] - 1)**2).mean() # Squared error
 
-        print('Run:', run_name)
-        print(f'    HomoNorm{target}s:', run[f'HomoNorm{target}'].tolist())
-        print('    Sum  :', df.loc[run.index, f'HomoNorm{target}Sum'].tolist()[0])
-        print('    HMean:', df.loc[run.index, f'HomoNorm{target}Hmean'].tolist()[0])
-        print('    Var  :', df.loc[run.index, f'HomoNorm{target}Var'].tolist()[0])
-        print('    Std  :', df.loc[run.index, f'HomoNorm{target}Std'].tolist()[0])
-        print('    MSE  :', df.loc[run.index, f'HomoNorm{target}MSE'].tolist()[0])
+        print(f'    HomoNorm{target}s (vs. NormBaseline {df.loc[run.index, f"HomoNormBaseline"].tolist()[0]})     :', run[f'HomoNorm{target}'].tolist())
+        print(f'    HomoNorm{target}s (vs. DefaultBaseline {df.loc[run.index, f"HomoDefaultBaseline"].tolist()[0]}) :', run[f'HomoNorm{target}VsDefaultBaseline'].tolist())
+        print(f'    NormBaseline ({df.loc[run.index, f"HomoNormBaseline"].tolist()[0]}) statistics:')
+        print('        Sum  :', df.loc[run.index, f'HomoNorm{target}Sum'].tolist()[0])
+        print('        HMean:', df.loc[run.index, f'HomoNorm{target}Hmean'].tolist()[0])
+        print('        Var  :', df.loc[run.index, f'HomoNorm{target}Var'].tolist()[0])
+        print('        Std  :', df.loc[run.index, f'HomoNorm{target}Std'].tolist()[0])
+        print('        MSE  :', df.loc[run.index, f'HomoNorm{target}MSE'].tolist()[0])
 
     return df
 
 
-def add_single_norm_data(df, target):
+def add_single_norm_data(df, target, norm_baseline=None):
     """Compute the single-core-run normalized
     statistics for each core/run, after other stats
     have been calcuated.
@@ -578,40 +618,61 @@ def add_single_norm_data(df, target):
     # Get Single Norm of Target
     # NOTE: (Baseline of a hawkeye_split is a hawkeye_simple)
     for i, core in df.iterrows():
-        df_baseline = 'hawkeye_simple' if 'hawkeye_split' in core.Baseline else core.Baseline
-        #print('[DEBUG]', df_baseline, core.Baseline)
+        
+        if norm_baseline is None:
+            core_norm_baseline = default_norm_baseline(core.Baseline, norm='Single')
+        else:
+            core_norm_baseline = norm_baseline
+
         single_run = df[
             (df.Trace == core.Trace) &
-            (df.Baseline == df_baseline) &
+            (df.Baseline == core_norm_baseline) &
             (df.NumCPUs == 1) &
             (df.LLCSetsPerCPU == core.LLCSetsPerCPU) &
             (df.HomogeneousMix == True)
         ]
+        
+        # For calculating FairUtility constraint on this particular core,
+        # without introducing bias w.r.t a different normalization baseline.
+        single_run_default_norm = df[
+            (df.Trace == core.Trace) &
+            (df.Baseline == default_norm_baseline(core.Baseline, norm='Single')) &
+            (df.NumCPUs == 1) &
+            (df.LLCSetsPerCPU == core.LLCSetsPerCPU) &
+            (df.HomogeneousMix == True)
+        ]
+        
+        
+        df.loc[i, 'SingleNormBaseline'] = core_norm_baseline
+        df.loc[i, 'SingleDefaultBaseline'] = default_norm_baseline(core.Baseline, norm='Single')
         df.loc[i, f'SingleNorm{target}'] = core[target] / single_run[target].mean()
+        df.loc[i, f'SingleNorm{target}VsDefaultBaseline'] = core[target] / single_run_default_norm[target].mean()
 
     # Get Single Norm Target statistics for each run
     runs = df.groupby('RunName')
     for run_name in df.RunName.unique():
         run = runs.get_group(run_name)
+        
+        print('Run:', run_name)
         df.loc[run.index, f'SingleNorm{target}Sum'] = np.sum(run[f'SingleNorm{target}'])
-        df.loc[run.index, f'SingleNorm{target}Hmean'] = stats.hmean(run[f'SingleNorm{target}'])
+        df.loc[run.index, f'SingleNorm{target}Hmean'] = stats.hmean(run[f'SingleNorm{target}']) if not run[f'SingleNorm{target}'].isnull().all() else np.nan
         df.loc[run.index, f'SingleNorm{target}Var'] = np.var(run[f'SingleNorm{target}'])
         df.loc[run.index, f'SingleNorm{target}Std'] = np.std(run[f'SingleNorm{target}'])
         df.loc[run.index, f'SingleNorm{target}MSE'] = ((run[f'SingleNorm{target}'] - 1)**2).mean() # Squared error
-
-        print('Run:', run_name)
-        print(f'    SingleNorm{target}s:', run[f'SingleNorm{target}'].tolist())
-        print('    Sum  :', df.loc[run.index, f'SingleNorm{target}Sum'].tolist()[0])
-        print('    HMean:', df.loc[run.index, f'SingleNorm{target}Hmean'].tolist()[0])
-        print('    Var  :', df.loc[run.index, f'SingleNorm{target}Var'].tolist()[0])
-        print('    Std  :', df.loc[run.index, f'SingleNorm{target}Std'].tolist()[0])
-        print('    MSE  :', df.loc[run.index, f'SingleNorm{target}MSE'].tolist()[0])
+        
+        print(f'    SingleNorm{target}s (vs. NormBaseline {df.loc[run.index, f"SingleNormBaseline"].tolist()[0]}) :', run[f'SingleNorm{target}'].tolist())
+        print(f'    SingleNorm{target}s (vs. DefaultBaseline {df.loc[run.index, f"SingleDefaultBaseline"].tolist()[0]}) :', run[f'SingleNorm{target}VsDefaultBaseline'].tolist())
+        print(f'    NormBaseline ({df.loc[run.index, f"SingleNormBaseline"].tolist()[0]}) statistics:')
+        print('        Sum  :', df.loc[run.index, f'SingleNorm{target}Sum'].tolist()[0])
+        print('        HMean:', df.loc[run.index, f'SingleNorm{target}Hmean'].tolist()[0])
+        print('        Var  :', df.loc[run.index, f'SingleNorm{target}Var'].tolist()[0])
+        print('        Std  :', df.loc[run.index, f'SingleNorm{target}Std'].tolist()[0])
+        print('        MSE  :', df.loc[run.index, f'SingleNorm{target}MSE'].tolist()[0])
 
     return df
 
 
-
-def build_run_statistics(results_dir, output_file):
+def build_run_statistics(results_dir, output_file, norm_baseline=None):
     """Build statistics for each run, per-core.
     """
     traces = {}
@@ -627,24 +688,27 @@ def build_run_statistics(results_dir, output_file):
 
     columns = ['Trace', 'Baseline', 'CPU', 'NumCPUs', 'HawkeyeSplitAllocation',
                'LLCSets', 'LLCSetsPerCPU',
-               'HomogeneousMix', 'MPKI', 'IPC', 'CPI',
+               'HomogeneousMix', 'MPKI', 'IPC', 'CPI', 'NumInstMillions',
                'LoadMisses', 'RFOMisses', 'RunName']
     
     run_df = pd.DataFrame(columns=columns)
     for trace in tqdm(traces, dynamic_ncols=True, unit='trace'):
         d = traces[trace]
         for baseline, llc_sets in d:
-            run_df = run_df.append(compute_stats(d[(baseline, llc_sets)], baseline_name=baseline))
+            run_df = run_df.append(compute_stats(
+                d[(baseline, llc_sets)], 
+                baseline_name=baseline
+            ))
 
     # Get the Homo-normalized statistics for each run
-    run_df = add_homo_norm_data(run_df, 'IPC')
-    run_df = add_homo_norm_data(run_df, 'CPI')
-    run_df = add_homo_norm_data(run_df, 'MPKI')
+    run_df = add_homo_norm_data(run_df, 'IPC', norm_baseline=norm_baseline)
+    run_df = add_homo_norm_data(run_df, 'CPI', norm_baseline=norm_baseline)
+    run_df = add_homo_norm_data(run_df, 'MPKI', norm_baseline=norm_baseline)
 
     # Get the Single-normalized statistics for each run
-    run_df = add_single_norm_data(run_df, 'IPC')
-    run_df = add_single_norm_data(run_df, 'CPI')
-    run_df = add_single_norm_data(run_df, 'MPKI')
+    run_df = add_single_norm_data(run_df, 'IPC', norm_baseline=norm_baseline)
+    run_df = add_single_norm_data(run_df, 'CPI', norm_baseline=norm_baseline)
+    run_df = add_single_norm_data(run_df, 'MPKI', norm_baseline=norm_baseline)
 
     run_df.to_csv(output_file, index=False)
 
@@ -719,16 +783,24 @@ def eval_command():
     """Eval command
     """
     parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
-    parser.add_argument('--results-dir', default=default_results_dir)
+    parser.add_argument('results_dir')
     parser.add_argument('--output-file', default=default_output_file)
+    parser.add_argument('--norm-baseline', type=str, default=None)
 
     args = parser.parse_args(sys.argv[2:])
 
     print('=== Building run statistics... ===')
-    build_run_statistics(args.results_dir, args.output_file)
+    if args.norm_baseline:
+        norm_baseline = replacement_fns[replacement_names.index(args.norm_baseline)]
+        print(f'Using normalization baseline {args.norm_baseline} ({norm_baseline})...')
+    else:
+        norm_baseline = None
+        
+    build_run_statistics(args.results_dir, args.output_file, norm_baseline=norm_baseline)
 
-    print('=== Building trace statistics... ===')
-    build_trace_statistics(args.output_file)
+    print('=== [DEBUG] *NOT* building trace statistics... ===')
+    #print('=== Building trace statistics... ===')
+    #build_trace_statistics(args.output_file)
 
 
 
