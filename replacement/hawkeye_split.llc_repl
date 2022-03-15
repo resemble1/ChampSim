@@ -5,12 +5,13 @@
 //This license is designed to guarantee freedom to use the software for these purposes. If you wish to
 //distribute or make other use of the software, you may purchase a license to do so from the University of
 //Texas.
-///////////////////////////////////////////////
-//                                            //
-//     Hawkeye [Jain and Lin, ISCA' 16]       //
-//     Akanksha Jain, akanksha@cs.utexas.edu  //
-//                                            //
-///////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////
+//                                                              //
+//     Hawkeye [Jain and Lin, ISCA' 16]                         //
+//     Akanksha Jain, akanksha@cs.utexas.edu                    //
+//     Improvements by Carson Molder, cmolder@cs.utexas.edu     //
+//                                                              //
+//////////////////////////////////////////////////////////////////
 
 // Source code for configs 1 and 2
 
@@ -50,11 +51,15 @@ OPTgen perset_optgen[NUM_CPUS][LLC_SETS]; // per-set occupancy vectors; we only 
 #define bitmask(l) (((l) == 64) ? (unsigned long long)(-1LL) : ((1LL << (l))-1LL))
 #define bits(x, i, l) (((x) >> (i)) & bitmask(l))
 
+// Cache bypassing
+// If enabled, the cache-averse line for OPTgen is allocated to cache-friendly lines.
+//#define BYPASSING
+
+// Set sampling
 #define SAMPLING
-//Sample 64 sets per core
-#ifdef SAMPLING
+#ifdef SAMPLING // Sample 64 sets per core
     #define SAMPLED_SET(set) (bits(set, 0 , 6) == bits(set, ((unsigned long long)log2(LLC_SETS) - 6), 6) )
-#else
+#else // Sample all sets
     #define SAMPLED_SET(set) (true)
 #endif
 
@@ -64,7 +69,8 @@ OPTgen perset_optgen[NUM_CPUS][LLC_SETS]; // per-set occupancy vectors; we only 
 #define SAMPLED_CACHE_SIZE 2800
 map<uint64_t, ADDR_INFO> addr_history[NUM_CPUS]; // Sampler
 
-const int OPTGEN_PERCPU_WAYS[] = {3, 13}; // Change this to alter the soft partition.
+// Soft partiton
+const int OPTGEN_PERCPU_WAYS[] = {3, 13}; // Change this to alter the partition.
 // initialize replacement state
 void CACHE::llc_initialize_replacement()
 {
@@ -78,10 +84,15 @@ void CACHE::llc_initialize_replacement()
 
             perset_mytimer[k][i] = 0;
 
+#ifdef BYPASSING
+            perset_optgen[k][i].init(OPTGEN_PERCPU_WAYS[k]);
+#else
+            // Leave one way for cache-averse lines (taken from last core)
             if (k == NUM_CPUS - 1)
-                perset_optgen[k][i].init(OPTGEN_PERCPU_WAYS[k] - 1); // Leave one way for OPT-predicted misses (taken from last core)
+                perset_optgen[k][i].init(OPTGEN_PERCPU_WAYS[k] - 1); 
             else
                 perset_optgen[k][i].init(OPTGEN_PERCPU_WAYS[k]);
+#endif
         }
 
         demand_predictor[k] = new HAWKEYE_PC_PREDICTOR();
@@ -100,6 +111,13 @@ void CACHE::llc_initialize_replacement()
 // return value should be 0 ~ 15 or 16 (bypass)
 uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type)
 {
+#ifdef BYPASSING
+    // Bypass the cache if we predict the line to be cache-averse.
+    bool new_prediction = demand_predictor[cpu]->get_prediction(ip);
+    if (!new_prediction)
+        return LLC_WAYS;
+#endif
+
     // look for the maxRRPV line
     for (uint32_t i=0; i<LLC_WAYS; i++)
         if (rrpv[set][i] == maxRRPV)
