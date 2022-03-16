@@ -1,0 +1,310 @@
+//Hawkeye Cache Replacement Tool v2.0
+//UT AUSTIN RESEARCH LICENSE (SOURCE CODE)
+//The University of Texas at Austin has developed certain software and documentation that it desires to
+//make available without charge to anyone for academic, research, experimental or personal use.
+//This license is designed to guarantee freedom to use the software for these purposes. If you wish to
+//distribute or make other use of the software, you may purchase a license to do so from the University of
+//Texas.
+//////////////////////////////////////////////////////////////////
+//                                                              //
+//     Hawkeye [Jain and Lin, ISCA' 16]                         //
+//     Akanksha Jain, akanksha@cs.utexas.edu                    //
+//     Improvements by Carson Molder, cmolder@cs.utexas.edu     //
+//                                                              //
+//////////////////////////////////////////////////////////////////
+
+// Source code for configs 1 and 2
+
+#include "cache.h"
+#include <map>
+#include <cassert>
+
+#define LLC_SETS LLC_SET
+#define LLC_WAYS LLC_WAY
+
+
+//3-bit RRIP counters or all lines
+#define maxRRPV 7
+uint32_t rrpv[LLC_SETS][LLC_WAYS];       // RRPV of block
+uint32_t source_cpu[LLC_SETS][LLC_WAYS]; // CPU that inserted block
+uint64_t signatures[LLC_SETS][LLC_WAYS]; // Signatures for sampled sets; we only use 64 of these
+                                         // - Budget = 64 sets * 16 ways * 12-bit signature per line = 1.5B
+uint64_t perset_mytimer[NUM_CPUS][LLC_SETS];
+
+// Hawkeye Predictors for demand and prefetch requests
+// Predictor with 2K entries and 5-bit counter per entry
+// Budget = 2048*5/8 bytes = 1.2KB
+#define MAX_SHCT 31
+#define SHCT_SIZE_BITS 11
+#define SHCT_SIZE (1<<SHCT_SIZE_BITS)
+
+#include "hawkeye_predictor.h"
+HAWKEYE_PC_PREDICTOR* demand_predictor[NUM_CPUS]; // Predictor
+                                                  // Allocate a separate Hawkeye Predictor per-core, using its associated OPTgen's outputs.
+
+#include "optgen_simple.h"
+OPTgen perset_optgen[NUM_CPUS][LLC_SETS]; // per-set occupancy vectors; we only use 64 of these
+                                          // Allocate a separate OPTgen per core, assuming a different share of the LLC 
+                                          // as defined by OPTGEN_PERCPU_WAYS (number of ways out of LLC_WAYS).
+
+#include <math.h>
+#define bitmask(l) (((l) == 64) ? (unsigned long long)(-1LL) : ((1LL << (l))-1LL))
+#define bits(x, i, l) (((x) >> (i)) & bitmask(l))
+
+// Cache bypassing
+// If enabled, the cache-averse line for OPTgen is allocated to cache-friendly lines.
+#define BYPASSING
+
+// Set sampling
+#define SAMPLING
+#ifdef SAMPLING // Sample 64 sets per core
+    #define SAMPLED_SET(set) (bits(set, 0 , 6) == bits(set, ((unsigned long long)log2(LLC_SETS) - 6), 6) )
+#else // Sample all sets
+    #define SAMPLED_SET(set) (true)
+#endif
+
+// Sampler to track 8x cache history for sampled sets
+// 2800 entris * 4 bytes per entry = 11.2KB
+// Allocate a sampler per core.
+#define SAMPLED_CACHE_SIZE 2800
+map<uint64_t, ADDR_INFO> addr_history[NUM_CPUS]; // Sampler
+
+// Hard partiton
+const int OPTGEN_PERCPU_WAYS[] = {3, 13}; // Change this to alter the partition.
+// initialize replacement state
+void CACHE::llc_initialize_replacement()
+{
+    for(int k=0; k<NUM_CPUS; k++) {
+        for (int i=0; i<LLC_SETS; i++) {
+            for (int j=0; j<LLC_WAYS; j++) {
+                rrpv[i][j] = maxRRPV;
+                source_cpu[i][j] = 0;
+                signatures[i][j] = 0;
+            }
+
+            perset_mytimer[k][i] = 0;
+
+#ifdef BYPASSING
+            perset_optgen[k][i].init(OPTGEN_PERCPU_WAYS[k]);
+#else
+            // Leave one way for cache-averse lines (taken from last core)
+            if (k == NUM_CPUS - 1)
+                perset_optgen[k][i].init(OPTGEN_PERCPU_WAYS[k] - 1); 
+            else
+                perset_optgen[k][i].init(OPTGEN_PERCPU_WAYS[k]);
+#endif
+        }
+
+        demand_predictor[k] = new HAWKEYE_PC_PREDICTOR();
+        addr_history[k].clear();
+    }
+
+   
+    // Print split of predictor
+    cout << "Initialize Split Hawkeye state" << endl;
+    for (int k = 0; k < NUM_CPUS; k++) {
+        cout << "OPTgen core " << k << ": " << perset_optgen[k][0].CACHE_SIZE << " ways" << endl;
+    }
+}
+
+/* First way to check in hard partition.
+   (0 for core 0; sum(OPTGEN_PERCPU_WAYS[:cpu - 1] for cores 1, 2,..) */
+uint32_t _lower_way_boundary(uint32_t cpu) {
+    if (cpu == 0)
+        return 0;
+    
+    uint32_t lower_way = 0;
+    for (uint32_t i = 0; i < cpu; i++)
+        lower_way += OPTGEN_PERCPU_WAYS[i];
+    return lower_way;
+}
+
+/* Last way to check in hard partition + 1.
+   (sum(OPTGEN_PERCPU_WAYS[:cpu] for cores 0, 1, ...; LLC_WAYS for core n) */
+uint32_t _upper_way_boundary(uint32_t cpu) {
+     if (cpu == NUM_CPUS - 1)
+        return LLC_WAYS;
+    
+    uint32_t upper_way = 0;
+    for (uint32_t i = 0; i < cpu + 1; i++)
+        upper_way += OPTGEN_PERCPU_WAYS[i];
+    return upper_way;
+}
+
+// find replacement victim
+// return value should be 0 ~ 15 or 16 (bypass)
+uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type)
+{
+#ifdef BYPASSING
+    // Bypass the cache if we predict the line to be cache-averse.
+    bool new_prediction = demand_predictor[cpu]->get_prediction(ip);
+    if (!new_prediction)
+        return LLC_WAYS;
+#endif
+
+    // These boundaries enforce the hard partition.
+    uint32_t imin = _lower_way_boundary(cpu); 
+    uint32_t imax = _upper_way_boundary(cpu);
+    
+    // look for the maxRRPV line
+    for (uint32_t i = imin; i < imax; i++)
+        if (rrpv[set][i] == maxRRPV)
+            return i;
+
+    //If we cannot find a cache-averse line, we evict the oldest cache-friendly line
+    // Since this version is hard partitioned, only consider the ways in our partition (per OPTGEN_PERCPU_WAYS).
+    uint32_t max_rrip = 0;
+    int32_t lru_victim = -1;
+    
+    for (uint32_t i = imin; i < imax; i++)
+    {
+        if (rrpv[set][i] >= max_rrip)
+        {
+            max_rrip = rrpv[set][i];
+            lru_victim = i;
+        }
+    }
+
+    assert (lru_victim != -1);
+    //The predictor is trained negatively on LRU evictions
+    if( SAMPLED_SET(set) )
+        demand_predictor[source_cpu[set][lru_victim]]->decrement(signatures[set][lru_victim]);
+    return lru_victim;
+
+    // WE SHOULD NOT REACH HERE
+    assert(0);
+    return 0;
+}
+
+void replace_addr_history_element(uint32_t cpu)
+{
+    uint64_t lru_addr = 0;
+    uint64_t lru_time = 10000000;
+    
+    for(map<uint64_t, ADDR_INFO>::iterator it=addr_history[cpu].begin(); it != addr_history[cpu].end(); it++)
+    {
+        if((it->second).last_quanta < lru_time)
+        {
+            lru_time =  (it->second).last_quanta;
+            lru_addr = it->first;
+        }
+    }
+    assert(lru_addr != 0);
+    addr_history[cpu].erase(lru_addr);
+}
+
+// called on every cache hit and cache fill
+void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit)
+{
+    uint64_t paddr = (full_addr >> 6) << 6;
+
+    if (type == WRITEBACK)
+        return;
+
+
+    //If we are sampling, OPTgen will only see accesses from sampled sets
+    if(SAMPLED_SET(set))
+    {
+        //The current timestep 
+        uint64_t curr_quanta = perset_mytimer[cpu][set];
+
+        // This line has been used before. Since the right end of a usage interval is always 
+        //a demand, ignore prefetches
+        if(addr_history[cpu].find(paddr) != addr_history[cpu].end())
+        {
+            uint64_t last_quanta = addr_history[cpu][paddr].last_quanta;
+            assert(curr_quanta >= addr_history[cpu][paddr].last_quanta);
+
+            //Train the predictor positively because OPT would have cached this line
+            if( perset_optgen[cpu][set].should_cache(curr_quanta, last_quanta))
+            {
+                demand_predictor[cpu]->increment(addr_history[cpu][paddr].PC);
+            }
+            else
+            {
+                //Train the predictor negatively because OPT would not have cached this line
+                demand_predictor[cpu]->decrement(addr_history[cpu][paddr].PC);
+            }
+            //Some maintenance operations for OPTgen
+            perset_optgen[cpu][set].add_access(curr_quanta);
+        }
+        // This is the first time we are seeing this line
+        else
+        {
+#ifdef SAMPLING
+            // Find a victim from the sampled cache if we are sampling
+            size_t sampled_cache_size_cpu = (SAMPLED_CACHE_SIZE * OPTGEN_PERCPU_WAYS[cpu]) / LLC_WAYS; // Scale sampler by ways allocated
+            assert(addr_history[cpu].size() <= sampled_cache_size_cpu);
+            if(addr_history[cpu].size() == sampled_cache_size_cpu) 
+                replace_addr_history_element(cpu);
+            assert(addr_history[cpu].size() < sampled_cache_size_cpu);
+#endif
+            //Initialize a new entry in the sampler
+            addr_history[cpu][paddr].init(curr_quanta);
+            perset_optgen[cpu][set].add_access(curr_quanta);
+        }
+
+        // Get Hawkeye's prediction for this line
+        bool new_prediction = demand_predictor[cpu]->get_prediction (ip);
+
+        // Update the sampler with the timestamp, PC and our prediction
+        // For prefetches, the PC will represent the trigger PC
+        addr_history[cpu][paddr].update(perset_mytimer[cpu][set], ip, new_prediction);
+        addr_history[cpu][paddr].lru = 0;
+
+        //Increment the set timer
+        perset_mytimer[cpu][set] = (perset_mytimer[cpu][set]+1);
+    }
+
+    bool new_prediction = demand_predictor[cpu]->get_prediction (ip);
+
+    signatures[set][way] = ip;
+    source_cpu[set][way] = cpu;
+
+    //Set RRIP values and age cache-friendly line
+    if(!new_prediction)
+        rrpv[set][way] = maxRRPV;
+    else
+    {
+        rrpv[set][way] = 0;
+        if(!hit)
+        {
+            bool saturated = false;
+            for(uint32_t i=0; i<LLC_WAYS; i++)
+                if (rrpv[set][i] == maxRRPV-1)
+                    saturated = true;
+
+            //Age all the cache-friendly  lines
+            for(uint32_t i=0; i<LLC_WAYS; i++)
+            {
+                if (!saturated && rrpv[set][i] < maxRRPV-1)
+                    rrpv[set][i]++;
+            }
+        }
+        rrpv[set][way] = 0;
+    }
+}
+
+// use this function to print out your own stats at the end of simulation
+void CACHE::llc_replacement_final_stats()
+{
+    unsigned int hits = 0;
+    unsigned int accesses = 0;
+    unsigned int traffic = 0;
+    for(unsigned int i=0; i<LLC_SETS; i++)
+    {
+        for(unsigned int k=0; k<NUM_CPUS; k++) {
+            accesses += perset_optgen[k][i].access;
+            hits += perset_optgen[k][i].get_num_opt_hits();
+            traffic += perset_optgen[k][i].get_traffic();
+        }
+    }
+
+    std::cout << "OPTgen accesses: " << accesses << std::endl;
+    std::cout << "OPTgen hits: " << hits << std::endl;
+    std::cout << "OPTgen hit rate: " << 100*(double)hits/(double)accesses << std::endl;
+    std::cout << "Traffic: " << traffic << " " << 100*(double)traffic/(double)accesses << std::endl;
+
+    cout << endl << endl;
+    return;
+}

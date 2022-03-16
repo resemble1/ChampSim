@@ -23,14 +23,15 @@ default_results_dir = './results'
 default_output_file = './stats.csv'
 default_instrs = 500
 default_printing_period_instrs = 10
+default_llc_sets = 2048
 
 default_seed_file = './scripts/seeds.txt'
 
 # No prefetcher
 default_binary = 'bin/hashed_perceptron-no-no-no-no-{replacement_fn}-{n_cores}core'
 default_binary_sets = 'bin/hashed_perceptron-no-no-no-no-{replacement_fn}-{n_cores}core-{n_sets}llc_sets'
-replacement_names = ['lru', 'ucp', 'hawkeye', 'hawkeye_split', 'hawkeye_split_hard']
-replacement_fns = ['lru', 'ucp', 'hawkeye_simple', 'hawkeye_split', 'hawkeye_split_hard']
+replacement_names = ['lru', 'ucp', 'hawkeye', 'hawkeye_split', 'hawkeye_split_hard', 'hawkeye_split_hard_bypassing']
+replacement_fns = ['lru', 'ucp', 'hawkeye_simple', 'hawkeye_split', 'hawkeye_split_hard', 'hawkeye_split_hard_bypassing']
 
 # Example:
 #   64 bytes per line
@@ -53,18 +54,23 @@ Available commands:
                      can be displayed with `{prog} help command`
 '''.format(prog=sys.argv[0]),
 
-'build': '''usage: {prog} build <target> [-c / --cores <core-count-list>]
+'build': '''usage: {prog} build <target> [-c / --cores <core-count-list>] [-s / --sets <llc-set-count-list>]
+                                [--hawkeye-splits <hawkeye_split_list>]
 
 Description:
-    {prog} build <target>
-        Builds <target> ChampSim binaries where <target> is one of:
+    {prog} build <replacement-policy>
+        Builds ChampSim binaries using <replacement-policy>, where <replacement-policy> is one of:
 
-            all                Builds lru, ucpl and regular Hawkeye binaries.
-            lru                Builds just the lru binary that uses a least-recently-used eviction policy
-            ucp                Builds just the ucp binary that uses Utility-based Cache Partitioning + LRU eviction
-            hawkeye            Builds just the Hawkeye binary that uses a standard Hawkeye eviction policy
-            hawkeye_split      Builds just the Hawkeye Split binary (need to pass splits to --hawkeye_splits)
-            hawkeye_split_hard Builds just the Hawkeye Split Hard binary (need to pass splits to --hawkeye_splits)
+        Regular policies:
+            all           Build all regular policies.
+            lru           Least-recently-used eviction policy
+            ucp           Utility-based Cache Partitioning with LRU eviction
+            hawkeye       Standard Hawkeye (one OPTgen / predictor)
+            
+        Split Hawkeye policies: (only pass one core to -c, need to pass splits to --hawkeye_splits)
+            hawkeye_split                Soft-Partitioned Hawkeye (per-core OPTgens / predictors)
+            hawkeye_split_hard           Hard-Partitioned Hawkeye (per-core OPTgens / predictors)
+            hawkeye_split_hard_bypassing Hard-Partitioned Hawkeye with bypassing of cache-averse lines
 
 Options:
     -c / --cores <core-count-list>
@@ -72,14 +78,11 @@ Options:
         version will always be built, but additional versions (e.g. 2-core / 4-core)
         can be listed here (e.g. using -c 2 4). The ChampSim script is tested up
         to 8 cores.
-
         Default: One core only
 
     -s / --sets <llc-set-count-list>
-        Specifies a list of set sizes to build ChampSim variants. The default
-        LLC has 2048 sets. (1 set = 1 KB -> 2 MB LLC).
-
-        Default: 2048 sets only.
+        Specifies a list of set sizes to build ChampSim variants.
+        Default: {default_llc_sets} sets only.
 
     --hawkeye-splits <hawkeye_split_list>
         Specifies a list of way-splits to build Split Hawkeye variants. Only one core
@@ -92,11 +95,12 @@ Options:
 
 Notes:
     Barring updates to the GitHub repository, this will only need to be done once.
-'''.format(prog=sys.argv[0], llc_ways=LLC_WAYS),
+'''.format(prog=sys.argv[0], llc_ways=LLC_WAYS, default_llc_sets=default_llc_sets),
 
-'run': '''usage: {prog} run <execution-traces> [-c / --cores <num-cores>] [--results-dir <results-dir>]
-                            [--num-instructions <num-instructions>] [--stat-printing-period <num-instructions>]
-                            [--seed-file <seed-file>]
+'run': '''usage: {prog} run <execution-traces> [-c / --cores <num-cores>] [-s / --sets <num-llc-sets>]
+                            [-t / --targets <list-of-targets>] [--hawkeye-split <hawkeye-split>]
+                            [--results-dir <results-dir>] [--num-instructions <num-instructions>] 
+                            [--stat-printing-period <num-instructions>]
 
 Description:
     {prog} run <execution-traces>
@@ -108,9 +112,9 @@ Options:
         The number of cores that ChampSim will be simulating. Must provide a <cores>
         length list of execution traces to the script. By default, one core is used.
 
-    -sets / --sets <num-llc-sets>
+    -s / --sets <num-llc-sets>
         The number of LLC cache sets that ChampSim will be simulating. By default,
-        2048 sets are used (if the binary is available).
+        {default_llc_sets} sets are used (if the binary is available).
 
     -t / --targets <list-of-targets>
         List of targets to run. By default, it will run all targets: {replacement_names}.
@@ -133,20 +137,18 @@ Options:
 '''.format(prog=sys.argv[0], default_results_dir=default_results_dir,
     replacement_names=replacement_names,
     default_instrs=default_instrs,
+    default_llc_sets=default_llc_sets,
     default_printing_period_instrs=default_printing_period_instrs,
     seed_file=default_seed_file),
 
-'eval': '''usage: {prog} eval <results-dir> [--output-file <output-file>]
+'eval': '''usage: {prog} eval <results-dir> [--output-file <output-file>] [--norm-baseline <baseline>]
 
 Description:
     {prog} eval
-        Runs the evaluation procedure on the ChampSim output found in the specified
+        Runs the evaluation procedure on the ChampSim result files found in the specified
         results directory and outputs a CSV at the specified output path.
 
 Options:
-    --results-dir <results-dir>
-        Specifies what directory the ChampSim results files are in.
-
     --output-file <output-file>
         Specifies what file path to save the stats CSV data to. This defaults to
         `{default_output_file}`.
@@ -299,7 +301,7 @@ def build_command():
     parser = argparse.ArgumentParser(usage=argparse.SUPPRESS, add_help=False)
     parser.add_argument('target', default=None)
     parser.add_argument('-c', '--cores', type=int, nargs='+', default=[1])
-    parser.add_argument('-s', '--sets', type=int, nargs='+', default=[2048])
+    parser.add_argument('-s', '--sets', type=int, nargs='+', default=[default_llc_sets])
     parser.add_argument('--hawkeye-splits', type=int, nargs='+', default=[]) # default: exhaustive splits over LLC_WAYS. (this can get BIG!)
     args = parser.parse_args(sys.argv[2:])
 
@@ -362,7 +364,7 @@ def run_command():
     parser.add_argument('execution_traces', nargs='+', type=str, default=None)
     parser.add_argument('-t', '--targets', nargs='+', type=str, default=replacement_names)
     parser.add_argument('-c', '--cores', type=int, default=1)
-    parser.add_argument('-s', '--sets', type=int, default=2048)
+    parser.add_argument('-s', '--sets', type=int, default=default_llc_sets)
     parser.add_argument('--hawkeye-split', nargs='+', type=int, default=None)
     parser.add_argument('--results-dir', default=default_results_dir)
     parser.add_argument('--num-instructions', default=500) #None) #default_spec_instrs if execution_trace[0].isdigit() else default_gap_instrs)
@@ -591,6 +593,7 @@ def add_homo_norm_data(df, target, norm_baseline=None):
         
         print('Run:', run_name)
         df.loc[run.index, f'HomoNorm{target}Sum'] = np.sum(run[f'HomoNorm{target}'])
+        df.loc[run.index, f'HomoNorm{target}Product'] = np.prod(run[f'HomoNorm{target}'])
         df.loc[run.index, f'HomoNorm{target}Hmean'] = stats.hmean(run[f'HomoNorm{target}']) if not run[f'HomoNorm{target}'].isnull().all() else np.nan
         df.loc[run.index, f'HomoNorm{target}Var'] = np.var(run[f'HomoNorm{target}'])
         df.loc[run.index, f'HomoNorm{target}Std'] = np.std(run[f'HomoNorm{target}'])
@@ -599,11 +602,12 @@ def add_homo_norm_data(df, target, norm_baseline=None):
         print(f'    HomoNorm{target}s (vs. NormBaseline {df.loc[run.index, f"HomoNormBaseline"].tolist()[0]})     :', run[f'HomoNorm{target}'].tolist())
         print(f'    HomoNorm{target}s (vs. DefaultBaseline {df.loc[run.index, f"HomoDefaultBaseline"].tolist()[0]}) :', run[f'HomoNorm{target}VsDefaultBaseline'].tolist())
         print(f'    NormBaseline ({df.loc[run.index, f"HomoNormBaseline"].tolist()[0]}) statistics:')
-        print('        Sum  :', df.loc[run.index, f'HomoNorm{target}Sum'].tolist()[0])
-        print('        HMean:', df.loc[run.index, f'HomoNorm{target}Hmean'].tolist()[0])
-        print('        Var  :', df.loc[run.index, f'HomoNorm{target}Var'].tolist()[0])
-        print('        Std  :', df.loc[run.index, f'HomoNorm{target}Std'].tolist()[0])
-        print('        MSE  :', df.loc[run.index, f'HomoNorm{target}MSE'].tolist()[0])
+        print('        Sum    :', df.loc[run.index, f'HomoNorm{target}Sum'].tolist()[0])
+        print('        Product:', df.loc[run.index, f'HomoNorm{target}Product'].tolist()[0])
+        print('        HMean  :', df.loc[run.index, f'HomoNorm{target}Hmean'].tolist()[0])
+        print('        Var    :', df.loc[run.index, f'HomoNorm{target}Var'].tolist()[0])
+        print('        Std    :', df.loc[run.index, f'HomoNorm{target}Std'].tolist()[0])
+        print('        MSE    :', df.loc[run.index, f'HomoNorm{target}MSE'].tolist()[0])
 
     return df
 
@@ -655,6 +659,7 @@ def add_single_norm_data(df, target, norm_baseline=None):
         
         print('Run:', run_name)
         df.loc[run.index, f'SingleNorm{target}Sum'] = np.sum(run[f'SingleNorm{target}'])
+        df.loc[run.index, f'SingleNorm{target}Product'] = np.prod(run[f'SingleNorm{target}'])
         df.loc[run.index, f'SingleNorm{target}Hmean'] = stats.hmean(run[f'SingleNorm{target}']) if not run[f'SingleNorm{target}'].isnull().all() else np.nan
         df.loc[run.index, f'SingleNorm{target}Var'] = np.var(run[f'SingleNorm{target}'])
         df.loc[run.index, f'SingleNorm{target}Std'] = np.std(run[f'SingleNorm{target}'])
@@ -663,11 +668,12 @@ def add_single_norm_data(df, target, norm_baseline=None):
         print(f'    SingleNorm{target}s (vs. NormBaseline {df.loc[run.index, f"SingleNormBaseline"].tolist()[0]}) :', run[f'SingleNorm{target}'].tolist())
         print(f'    SingleNorm{target}s (vs. DefaultBaseline {df.loc[run.index, f"SingleDefaultBaseline"].tolist()[0]}) :', run[f'SingleNorm{target}VsDefaultBaseline'].tolist())
         print(f'    NormBaseline ({df.loc[run.index, f"SingleNormBaseline"].tolist()[0]}) statistics:')
-        print('        Sum  :', df.loc[run.index, f'SingleNorm{target}Sum'].tolist()[0])
-        print('        HMean:', df.loc[run.index, f'SingleNorm{target}Hmean'].tolist()[0])
-        print('        Var  :', df.loc[run.index, f'SingleNorm{target}Var'].tolist()[0])
-        print('        Std  :', df.loc[run.index, f'SingleNorm{target}Std'].tolist()[0])
-        print('        MSE  :', df.loc[run.index, f'SingleNorm{target}MSE'].tolist()[0])
+        print('        Sum    :', df.loc[run.index, f'SingleNorm{target}Sum'].tolist()[0])
+        print('        Product:', df.loc[run.index, f'SingleNorm{target}Product'].tolist()[0])
+        print('        HMean  :', df.loc[run.index, f'SingleNorm{target}Hmean'].tolist()[0])
+        print('        Var    :', df.loc[run.index, f'SingleNorm{target}Var'].tolist()[0])
+        print('        Std    :', df.loc[run.index, f'SingleNorm{target}Std'].tolist()[0])
+        print('        MSE    :', df.loc[run.index, f'SingleNorm{target}MSE'].tolist()[0])
 
     return df
 
