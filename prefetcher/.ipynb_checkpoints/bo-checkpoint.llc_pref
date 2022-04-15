@@ -1,5 +1,5 @@
 #include "bo.h" 
-#define DEGREE 2
+#define DEGREE 1
 #include <iostream>
 #include <fstream>
 ofstream myfile;

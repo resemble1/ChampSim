@@ -1,3 +1,9 @@
+# Modified ChampSim for ReSemble
+
+We modify the [ChampSim for ML Prefetching Competition ](https://github.com/Quangmire/ChampSim) to evaluate our models.
+
+Our modification can generate prefetch files for four prefetchers: Best Offset, SPP, SISB, and Domino. The generated prefetch files are used to simulate ReSemble online prefetching.
+
 # Modified ChampSim for ML Prefetching Competition
 
 We will use ChampSim to evaluate the effectiveness of your ML prefetchers.  You
